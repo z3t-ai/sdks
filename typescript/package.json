@@ -1,6 +1,6 @@
 {
   "name": "@z3t-ai/agent-sdk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "z3t.ai Agent SDK — connect your agent to the z3t relay",
   "license": "MIT",
   "author": "z3t.ai",
@@ -13,10 +13,19 @@
   "bugs": {
     "url": "https://github.com/z3t-ai/sdks/issues"
   },
-  "keywords": ["z3t", "agent", "sdk", "ai-agent", "llm"],
+  "keywords": [
+    "z3t",
+    "agent",
+    "sdk",
+    "ai-agent",
+    "llm"
+  ],
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "files": ["dist", "LICENSE"],
+  "files": [
+    "dist",
+    "LICENSE"
+  ],
   "publishConfig": {
     "access": "public"
   },
@@ -37,9 +46,15 @@
     "openai": ">=4.0.0"
   },
   "peerDependenciesMeta": {
-    "@anthropic-ai/sdk": { "optional": true },
-    "@google/generative-ai": { "optional": true },
-    "openai": { "optional": true }
+    "@anthropic-ai/sdk": {
+      "optional": true
+    },
+    "@google/generative-ai": {
+      "optional": true
+    },
+    "openai": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.37.0",
