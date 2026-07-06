@@ -1,6 +1,6 @@
 {
   "name": "@z3t-ai/agent-sdk",
-  "version": "0.1.0",
+  "version": "0.1.2-beta.0",
   "description": "z3t.ai Agent SDK — connect your agent to the z3t relay",
   "license": "MIT",
   "author": "z3t.ai",
@@ -13,10 +13,19 @@
   "bugs": {
     "url": "https://github.com/z3t-ai/sdks/issues"
   },
-  "keywords": ["z3t", "agent", "sdk", "ai-agent", "llm"],
+  "keywords": [
+    "z3t",
+    "agent",
+    "sdk",
+    "ai-agent",
+    "llm"
+  ],
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "files": ["dist", "LICENSE"],
+  "files": [
+    "dist",
+    "LICENSE"
+  ],
   "publishConfig": {
     "access": "public"
   },
@@ -33,17 +42,23 @@
   },
   "peerDependencies": {
     "@anthropic-ai/sdk": ">=0.26.0",
-    "@google/generative-ai": ">=0.21.0",
+    "@google/genai": ">=1.0.0",
     "openai": ">=4.0.0"
   },
   "peerDependenciesMeta": {
-    "@anthropic-ai/sdk": { "optional": true },
-    "@google/generative-ai": { "optional": true },
-    "openai": { "optional": true }
+    "@anthropic-ai/sdk": {
+      "optional": true
+    },
+    "@google/genai": {
+      "optional": true
+    },
+    "openai": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.37.0",
-    "@google/generative-ai": "^0.21.0",
+    "@google/genai": "^2.10.0",
     "@types/node": "^22.0.0",
     "@types/ws": "^8.5.13",
     "@vitest/coverage-v8": "^3.2.0",

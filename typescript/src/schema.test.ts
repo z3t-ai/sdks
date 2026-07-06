@@ -126,18 +126,30 @@ describe('s.array()', () => {
     })
   })
 
-  it('adds format: z3t-file-list when items are fileOutput', () => {
-    expect(s.array(s.fileOutput())._def.format).toBe('z3t-file-list')
+  it('adds x-z3t-layout: file-list when items are fileOutput', () => {
+    const def = s.array(s.fileOutput())._def
+    expect(def['x-z3t-layout']).toEqual({ type: 'file-list' })
+    expect(def['x-z3t-display']).toBeUndefined()
+    expect(def.format).toBeUndefined()
   })
 
-  it('adds format: table when display=table', () => {
-    expect(s.array(s.object({ a: s.string() }), { display: 'table' })._def.format).toBe('table')
+  it('adds x-z3t-layout: table when layout=table', () => {
+    const def = s.array(s.object({ a: s.string() }), { layout: 'table' })._def
+    expect(def['x-z3t-layout']).toEqual({ type: 'table' })
+    expect(def['x-z3t-display']).toBeUndefined()
+    expect(def.format).toBeUndefined()
   })
 
-  it('adds sortable/searchable flags', () => {
-    const def = s.array(s.object({ a: s.string() }), { display: 'table', sortable: true, searchable: true })._def
-    expect(def['x-z3t-table-sortable']).toBe(true)
-    expect(def['x-z3t-table-searchable']).toBe(true)
+  it('includes sortable/searchable inside the layout object', () => {
+    const def = s.array(s.object({ a: s.string() }), { layout: 'table', sortable: true, searchable: true })._def
+    expect(def['x-z3t-layout']).toEqual({ type: 'table', sortable: true, searchable: true })
+    expect(def['x-z3t-table-sortable']).toBeUndefined()
+    expect(def['x-z3t-table-searchable']).toBeUndefined()
+  })
+
+  it('adds x-z3t-layout for other layout values', () => {
+    expect(s.array(s.image(), { layout: 'gallery' })._def['x-z3t-layout']).toEqual({ type: 'gallery' })
+    expect(s.array(s.string(), { layout: 'grid' })._def['x-z3t-layout']).toEqual({ type: 'grid' })
   })
 })
 
@@ -171,22 +183,26 @@ describe('s.markdown() / s.html() / s.code() / s.json() / s.image()', () => {
     ['html', s.html()],
     ['json', s.json()],
     ['image', s.image()],
-  ])('%s sets correct format', (format, f) => {
-    expect(f._def.format).toBe(format)
+  ])('%s sets x-z3t-display and no format', (display, f) => {
+    expect(f._def['x-z3t-display']).toBe(display)
+    expect(f._def.format).toBeUndefined()
   })
 
-  it('code sets x-z3t-code-language', () => {
-    expect(s.code({ language: 'python' })._def).toMatchObject({ format: 'code', 'x-z3t-code-language': 'python' })
+  it('code sets x-z3t-display and x-z3t-code-language', () => {
+    expect(s.code({ language: 'python' })._def).toMatchObject({ 'x-z3t-display': 'code', 'x-z3t-code-language': 'python' })
+    expect(s.code({ language: 'python' })._def.format).toBeUndefined()
   })
 })
 
 describe('s.percent() / s.fileOutput()', () => {
-  it('percent is type: number with format: percent', () => {
-    expect(s.percent()._def).toMatchObject({ type: 'number', format: 'percent' })
+  it('percent is type: number with x-z3t-display: percent', () => {
+    expect(s.percent()._def).toMatchObject({ type: 'number', 'x-z3t-display': 'percent' })
+    expect(s.percent()._def.format).toBeUndefined()
   })
 
-  it('fileOutput is type: string with format: z3t-file-output', () => {
-    expect(s.fileOutput()._def).toMatchObject({ type: 'string', format: 'z3t-file-output' })
+  it('fileOutput is type: string with x-z3t-display: file-output', () => {
+    expect(s.fileOutput()._def).toMatchObject({ type: 'string', 'x-z3t-display': 'file-output' })
+    expect(s.fileOutput()._def.format).toBeUndefined()
   })
 })
 

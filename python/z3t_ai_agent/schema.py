@@ -195,7 +195,7 @@ class _SchemaBuilder:
         self,
         item: SchemaField[Any],
         *,
-        display: Literal["table"] | None = None,
+        layout: Literal["table", "list", "grid", "gallery"] | None = None,
         min_items: int | None = None,
         max_items: int | None = None,
         sortable: bool | None = None,
@@ -208,16 +208,17 @@ class _SchemaBuilder:
         if max_items is not None:
             d["maxItems"] = max_items
 
-        # Output: array of file downloads → z3t-file-list format
-        if item._def.get("format") == "z3t-file-output":
-            d["format"] = "z3t-file-list"
-        # Output: array of objects → table format
-        if display == "table":
-            d["format"] = "table"
-        if sortable:
-            d["x-z3t-table-sortable"] = True
-        if searchable:
-            d["x-z3t-table-searchable"] = True
+        if item._def.get("x-z3t-display") == "file-output":
+            d["x-z3t-layout"] = {"type": "file-list"}
+        elif layout == "table":
+            layout_def: dict[str, Any] = {"type": "table"}
+            if sortable:
+                layout_def["sortable"] = True
+            if searchable:
+                layout_def["searchable"] = True
+            d["x-z3t-layout"] = layout_def
+        elif layout:
+            d["x-z3t-layout"] = {"type": layout}
 
         return SchemaField(d)
 
@@ -255,30 +256,30 @@ class _SchemaBuilder:
     # ── z3t platform output types ─────────────────────────────────────────
 
     def markdown(self, **opts: Any) -> SchemaField[str]:
-        return SchemaField({"type": "string", "format": "markdown", **_meta(**opts)})
+        return SchemaField({"type": "string", "x-z3t-display": "markdown", **_meta(**opts)})
 
     def html(self, **opts: Any) -> SchemaField[str]:
-        return SchemaField({"type": "string", "format": "html", **_meta(**opts)})
+        return SchemaField({"type": "string", "x-z3t-display": "html", **_meta(**opts)})
 
     def code(self, *, language: str | None = None, **opts: Any) -> SchemaField[str]:
-        d: dict[str, Any] = {"type": "string", "format": "code", **_meta(**opts)}
+        d: dict[str, Any] = {"type": "string", "x-z3t-display": "code", **_meta(**opts)}
         if language:
             d["x-z3t-code-language"] = language
         return SchemaField(d)
 
     def json(self, **opts: Any) -> SchemaField[str]:
-        return SchemaField({"type": "string", "format": "json", **_meta(**opts)})
+        return SchemaField({"type": "string", "x-z3t-display": "json", **_meta(**opts)})
 
     def image(self, **opts: Any) -> SchemaField[str]:
-        return SchemaField({"type": "string", "format": "image", **_meta(**opts)})
+        return SchemaField({"type": "string", "x-z3t-display": "image", **_meta(**opts)})
 
     def percent(self, **opts: Any) -> SchemaField[float]:
         """Output rendered as a percentage bar (value must be 0–1)."""
-        return SchemaField({"type": "number", "format": "percent", **_meta(**opts)})
+        return SchemaField({"type": "number", "x-z3t-display": "percent", **_meta(**opts)})
 
     def file_output(self, **opts: Any) -> SchemaField[str]:
         """Agent-produced file — rendered as a download button."""
-        return SchemaField({"type": "string", "format": "z3t-file-output", **_meta(**opts)})
+        return SchemaField({"type": "string", "x-z3t-display": "file-output", **_meta(**opts)})
 
     def pdf_reference(self, **opts: Any) -> "SchemaField[PdfReference]":
         """PDF source reference — rendered as a clickable chip that opens a PDF preview modal.

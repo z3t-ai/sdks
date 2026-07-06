@@ -60,10 +60,6 @@ def create_llm_clients(config: ResolvedConfig, call_id: str | None = None) -> Ll
         from google import genai
         from google.genai import types as genai_types
 
-        # Unlike the TypeScript SDK's Z3tGoogleGenerativeAI wrapper (which only injects
-        # baseUrl and can't carry the call-id header — see CLAUDE.md), google-genai's
-        # Client takes both base_url and headers directly via HttpOptions, so Google
-        # calls here are attributable to a specific call same as OpenAI/Anthropic.
         google_client = genai.Client(
             api_key=config.api_key,
             http_options=genai_types.HttpOptions(

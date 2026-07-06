@@ -80,8 +80,8 @@ interface EnumOptions extends BaseOptions {
 interface ArrayOptions extends BaseOptions {
   minItems?: number
   maxItems?: number
-  /** Render array-of-object output as a sortable table or source-reference list */
-  display?: 'table'
+  /** How to arrange the array items in output: table, grid, gallery, or list (default) */
+  layout?: 'table' | 'list' | 'grid' | 'gallery'
   sortable?: boolean
   searchable?: boolean
 }
@@ -259,12 +259,16 @@ export const s = {
     if (opts.minItems !== undefined) def.minItems = opts.minItems
     if (opts.maxItems !== undefined) def.maxItems = opts.maxItems
 
-    // Output: array of file downloads → z3t-file-list format
-    if (item._def['format'] === 'z3t-file-output') def.format = 'z3t-file-list'
-    // Output: array of objects → table format or source-reference list
-    if (opts.display === 'table') def.format = 'table'
-if (opts.sortable) def['x-z3t-table-sortable'] = true
-    if (opts.searchable) def['x-z3t-table-searchable'] = true
+    if (item._def['x-z3t-display'] === 'file-output') {
+      def['x-z3t-layout'] = { type: 'file-list' }
+    } else if (opts.layout === 'table') {
+      const layout: Record<string, unknown> = { type: 'table' }
+      if (opts.sortable) layout.sortable = true
+      if (opts.searchable) layout.searchable = true
+      def['x-z3t-layout'] = layout
+    } else if (opts.layout) {
+      def['x-z3t-layout'] = { type: opts.layout }
+    }
 
     return field<Exclude<T, undefined>[]>(def)
   },
@@ -305,39 +309,39 @@ if (opts.sortable) def['x-z3t-table-sortable'] = true
 
   /** Output rendered as Markdown */
   markdown(opts: BaseOptions = {}): SchemaField<string> {
-    return field<string>({ type: 'string', format: 'markdown', ...meta(opts) })
+    return field<string>({ type: 'string', 'x-z3t-display': 'markdown', ...meta(opts) })
   },
 
   /** Output rendered as sanitized HTML */
   html(opts: BaseOptions = {}): SchemaField<string> {
-    return field<string>({ type: 'string', format: 'html', ...meta(opts) })
+    return field<string>({ type: 'string', 'x-z3t-display': 'html', ...meta(opts) })
   },
 
   /** Output rendered as a syntax-highlighted code block */
   code(opts: CodeOptions = {}): SchemaField<string> {
-    const def: Record<string, unknown> = { type: 'string', format: 'code', ...meta(opts) }
+    const def: Record<string, unknown> = { type: 'string', 'x-z3t-display': 'code', ...meta(opts) }
     if (opts.language) def['x-z3t-code-language'] = opts.language
     return field<string>(def)
   },
 
   /** Output rendered as a syntax-highlighted JSON block */
   json(opts: BaseOptions = {}): SchemaField<string> {
-    return field<string>({ type: 'string', format: 'json', ...meta(opts) })
+    return field<string>({ type: 'string', 'x-z3t-display': 'json', ...meta(opts) })
   },
 
   /** Output rendered as an inline image */
   image(opts: BaseOptions = {}): SchemaField<string> {
-    return field<string>({ type: 'string', format: 'image', ...meta(opts) })
+    return field<string>({ type: 'string', 'x-z3t-display': 'image', ...meta(opts) })
   },
 
   /** Output rendered as a percentage bar (value must be 0–1) */
   percent(opts: BaseOptions = {}): SchemaField<number> {
-    return field<number>({ type: 'number', format: 'percent', ...meta(opts) })
+    return field<number>({ type: 'number', 'x-z3t-display': 'percent', ...meta(opts) })
   },
 
   /** Agent-produced file — rendered as a download button */
   fileOutput(opts: BaseOptions = {}): SchemaField<string> {
-    return field<string>({ type: 'string', format: 'z3t-file-output', ...meta(opts) })
+    return field<string>({ type: 'string', 'x-z3t-display': 'file-output', ...meta(opts) })
   },
 
   /** PDF source reference — rendered as a clickable chip that opens a PDF preview modal.

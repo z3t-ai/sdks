@@ -1,12 +1,12 @@
 import type OpenAI from 'openai'
 import type Anthropic from '@anthropic-ai/sdk'
-import type { GoogleGenerativeAI, ModelParams, RequestOptions } from '@google/generative-ai'
+import type { GoogleGenAI } from '@google/genai'
 import type { ResolvedConfig } from './types'
 
 export type LlmClients = {
   openai: OpenAI
   anthropic: Anthropic
-  google: GoogleGenerativeAI
+  google: GoogleGenAI
 }
 
 // Lazy getters — each LLM package is only require()'d when the handler actually
@@ -16,7 +16,7 @@ export function createLlmClients(config: ResolvedConfig, callId?: string): LlmCl
   const callHeaders = callId ? { 'x-agent-call-id': callId } : {}
   let _openai: OpenAI | undefined
   let _anthropic: Anthropic | undefined
-  let _google: GoogleGenerativeAI | undefined
+  let _google: GoogleGenAI | undefined
 
   return {
     get openai() {
@@ -47,15 +47,13 @@ export function createLlmClients(config: ResolvedConfig, callId?: string): LlmCl
       if (!_google) {
         try {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { GoogleGenerativeAI: Ctor } = require('@google/generative-ai') as { GoogleGenerativeAI: new (apiKey: string) => GoogleGenerativeAI & { getGenerativeModel(p: ModelParams, o?: RequestOptions): ReturnType<GoogleGenerativeAI['getGenerativeModel']> } }
-          const proxyBaseUrl = `${config.baseUrl}/llm/google`
-          const instance = new Ctor(config.apiKey)
-          const origGet = instance.getGenerativeModel.bind(instance)
-          instance.getGenerativeModel = (modelParams: ModelParams, requestOptions?: RequestOptions) =>
-            origGet(modelParams, { ...requestOptions, baseUrl: requestOptions?.baseUrl ?? proxyBaseUrl })
-          _google = instance
+          const { GoogleGenAI: Ctor } = require('@google/genai') as { GoogleGenAI: new (opts: object) => GoogleGenAI }
+          _google = new Ctor({
+            apiKey: config.apiKey,
+            httpOptions: { baseUrl: `${config.baseUrl}/llm/google`, headers: callHeaders },
+          })
         } catch {
-          throw new Error("ctx.llm.google requires the '@google/generative-ai' package. Run: npm install @google/generative-ai")
+          throw new Error("ctx.llm.google requires the '@google/genai' package. Run: npm install @google/genai")
         }
       }
       return _google
