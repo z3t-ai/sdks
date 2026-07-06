@@ -20,6 +20,24 @@ def test_object_omits_required_key_when_all_optional():
     assert "required" not in obj._def
 
 
+def test_object_layout_rows():
+    field = s.object(
+        {"title": s.string(), "confidence": s.number(), "sources": s.array(s.string()), "summary": s.markdown()},
+        layout=["title", ["confidence", "sources"], "summary"],
+    )
+    assert field._def["x-z3t-layout"] == {"type": "grid", "rows": ["title", ["confidence", "sources"], "summary"]}
+
+
+def test_object_layout_columns():
+    field = s.object({"a": s.string(), "b": s.string()}, columns=2)
+    assert field._def["x-z3t-layout"] == {"type": "grid", "columns": 2}
+
+
+def test_object_layout_takes_precedence_over_columns():
+    field = s.object({"a": s.string()}, layout=["a"], columns=3)
+    assert field._def["x-z3t-layout"] == {"type": "grid", "rows": ["a"]}
+
+
 def test_string_display_and_constraints():
     field = s.string(display="textarea", min_length=1, max_length=10, title="Notes")
     assert field._def == {

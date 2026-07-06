@@ -178,7 +178,14 @@ class _SchemaBuilder:
 
     # ── Composite ────────────────────────────────────────────────────────
 
-    def object(self, shape: dict[str, SchemaField[Any]], **opts: Any) -> SchemaField[dict[str, Any]]:
+    def object(
+        self,
+        shape: dict[str, SchemaField[Any]],
+        *,
+        layout: list[str | list[str]] | None = None,
+        columns: int | None = None,
+        **opts: Any,
+    ) -> SchemaField[dict[str, Any]]:
         properties: dict[str, Any] = {}
         required: list[str] = []
         for key, f in shape.items():
@@ -189,6 +196,10 @@ class _SchemaBuilder:
         d: dict[str, Any] = {"type": "object", "properties": properties, **_meta(**opts)}
         if required:
             d["required"] = required
+        if layout is not None:
+            d["x-z3t-layout"] = {"type": "grid", "rows": layout}
+        elif columns is not None:
+            d["x-z3t-layout"] = {"type": "grid", "columns": columns}
         return SchemaField(d)
 
     def array(

@@ -115,6 +115,7 @@ Every field is **required by default**. Call `.optional()` to make it optional.
 | `s.array(s.object({...}), { layout: 'grid' })` | Multi-column card grid |
 | `s.array(s.object({...}))` | Vertical card list (default) |
 | `s.object({...})` | Key-value detail card |
+| `s.object({...}, { columns: 2 })` | Fields arranged in a 2-column grid |
 | `s.pdfReference()` | Clickable chip → PDF preview modal — construct values with `PdfReference.create({ file, page?, hint? })` |
 | `s.typedValue()` | Frontend picks renderer from `format` — construct values with `TypedValue.markdown(str)`, `TypedValue.number(str)`, etc. |
 

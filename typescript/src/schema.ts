@@ -77,6 +77,13 @@ interface EnumOptions extends BaseOptions {
   colorMap?: Record<string, string>
 }
 
+interface ObjectOptions extends BaseOptions {
+  /** Explicit row arrangement: each entry is a field name (full-width) or an array of field names (side by side in that row). Takes precedence over `columns`. */
+  layout?: Array<string | string[]>
+  /** Simple multi-column flow grid — fields appear in schema order. Ignored when `layout` is set. */
+  columns?: number
+}
+
 interface ArrayOptions extends BaseOptions {
   minItems?: number
   maxItems?: number
@@ -238,7 +245,7 @@ export const s = {
 
   object<T extends Record<string, SchemaField<unknown>>>(
     shape: T,
-    opts: BaseOptions = {},
+    opts: ObjectOptions = {},
   ): SchemaField<InferShape<T>> {
     const properties: Record<string, unknown> = {}
     const required: string[] = []
@@ -250,6 +257,11 @@ export const s = {
 
     const def: Record<string, unknown> = { type: 'object', properties, ...meta(opts) }
     if (required.length > 0) def.required = required
+    if (opts.layout !== undefined) {
+      def['x-z3t-layout'] = { type: 'grid', rows: opts.layout }
+    } else if (opts.columns !== undefined) {
+      def['x-z3t-layout'] = { type: 'grid', columns: opts.columns }
+    }
 
     return field<InferShape<T>>(def)
   },

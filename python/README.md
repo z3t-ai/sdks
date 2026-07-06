@@ -148,6 +148,8 @@ are keyword arguments here (`s.string(title=...)`).
 | `s.array(s.image(), layout="gallery")` | Equal-sized image tile grid |
 | `s.array(s.object({...}), layout="grid")` | Multi-column card grid |
 | `s.array(s.object({...}))` | Vertical card list (default) |
+| `s.object({...})` | Key-value detail card |
+| `s.object({...}, columns=2)` | Fields arranged in a 2-column grid |
 | `s.pdf_reference()` | Clickable chip → PDF preview modal — construct values with `pdf_reference(file, page=..., hint=...)` |
 | `s.typed_value()` | Frontend picks renderer from `format` — construct values with `typed_value.markdown(str)`, `typed_value.number(str)`, etc. |
 

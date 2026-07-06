@@ -109,6 +109,27 @@ describe('s.object()', () => {
     const schema = s.object({ a: s.string(), b: s.number(), c: s.boolean() })
     expect(schema._def.required).toEqual(expect.arrayContaining(['a', 'b', 'c']))
   })
+
+  it('emits x-z3t-layout with rows when layout is set', () => {
+    const schema = s.object(
+      { title: s.string(), confidence: s.number(), sources: s.array(s.string()), summary: s.markdown() },
+      { layout: ['title', ['confidence', 'sources'], 'summary'] },
+    )
+    expect(schema._def['x-z3t-layout']).toEqual({
+      type: 'grid',
+      rows: ['title', ['confidence', 'sources'], 'summary'],
+    })
+  })
+
+  it('emits x-z3t-layout with columns when only columns is set', () => {
+    const schema = s.object({ a: s.string(), b: s.string() }, { columns: 2 })
+    expect(schema._def['x-z3t-layout']).toEqual({ type: 'grid', columns: 2 })
+  })
+
+  it('layout takes precedence over columns when both are set', () => {
+    const schema = s.object({ a: s.string() }, { layout: ['a'], columns: 3 })
+    expect(schema._def['x-z3t-layout']).toEqual({ type: 'grid', rows: ['a'] })
+  })
 })
 
 describe('s.array()', () => {
