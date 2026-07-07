@@ -1,6 +1,6 @@
 {
   "name": "@z3t-ai/agent-sdk",
-  "version": "0.1.2-beta.0",
+  "version": "0.1.2-beta.1",
   "description": "z3t.ai Agent SDK — connect your agent to the z3t relay",
   "license": "MIT",
   "author": "z3t.ai",
