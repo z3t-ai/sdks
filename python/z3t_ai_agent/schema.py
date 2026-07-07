@@ -34,6 +34,7 @@ def _meta(
     hint: str | None = None,
     order: int | None = None,
     group: str | None = None,
+    default: any | None = None,
 ) -> dict[str, Any]:
     out: dict[str, Any] = {}
     if title is not None:
@@ -46,6 +47,8 @@ def _meta(
         out["x-z3t-order"] = order
     if group is not None:
         out["x-z3t-group"] = group
+    if default is not None:
+        out["default"] = default
     return out
 
 
@@ -189,7 +192,12 @@ class _SchemaBuilder:
         properties: dict[str, Any] = {}
         required: list[str] = []
         for key, f in shape.items():
-            properties[key] = f._def
+            # JSON Schema `required` only checks key presence, not non-emptiness — "" satisfies it.
+            # Add minLength: 1 to required string fields so AJV also rejects empty strings.
+            prop_def = f._def
+            if not f._optional and prop_def.get("type") == "string" and "minLength" not in prop_def:
+                prop_def = {**prop_def, "minLength": 1}
+            properties[key] = prop_def
             if not f._optional:
                 required.append(key)
 

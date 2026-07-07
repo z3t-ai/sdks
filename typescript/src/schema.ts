@@ -8,7 +8,7 @@ export class SchemaField<T> {
   constructor(
     readonly _def: Record<string, unknown>,
     readonly _optional: boolean = false,
-  ) {}
+  ) { }
 
   /** Mark this field as optional. The handler's input type will reflect the field as `T | undefined`. */
   optional(): SchemaField<T | undefined> {
@@ -45,6 +45,8 @@ interface BaseOptions {
   order?: number
   /** Visual grouping label for adjacent fields */
   group?: string
+  /** Default value */
+  default?: unknown
 }
 
 interface StringOptions extends BaseOptions {
@@ -143,12 +145,12 @@ export interface TypedValue {
 }
 
 export const TypedValue = {
-  text:     (value: string): TypedValue => ({ format: 'text',     value }),
+  text: (value: string): TypedValue => ({ format: 'text', value }),
   markdown: (value: string): TypedValue => ({ format: 'markdown', value }),
-  number:   (value: string): TypedValue => ({ format: 'number',   value }),
-  date:     (value: string): TypedValue => ({ format: 'date',     value }),
-  boolean:  (value: string): TypedValue => ({ format: 'boolean',  value }),
-  enum:     (value: string): TypedValue => ({ format: 'enum',     value }),
+  number: (value: string): TypedValue => ({ format: 'number', value }),
+  date: (value: string): TypedValue => ({ format: 'date', value }),
+  boolean: (value: string): TypedValue => ({ format: 'boolean', value }),
+  enum: (value: string): TypedValue => ({ format: 'enum', value }),
 }
 
 // ─── Internal helpers ──────────────────────────────────────────────────────
@@ -160,6 +162,7 @@ function meta(opts: BaseOptions): Record<string, unknown> {
   if (opts.hint !== undefined) out['x-z3t-hint'] = opts.hint
   if (opts.order !== undefined) out['x-z3t-order'] = opts.order
   if (opts.group !== undefined) out['x-z3t-group'] = opts.group
+  if (opts.default !== undefined) out.default = opts.default
   return out
 }
 
@@ -251,7 +254,13 @@ export const s = {
     const required: string[] = []
 
     for (const [key, f] of Object.entries(shape)) {
-      properties[key] = f._def
+      // JSON Schema `required` only checks key presence, not non-emptiness — `""` satisfies it.
+      // Add minLength: 1 to required string fields so AJV also rejects empty strings.
+      let propDef = f._def
+      if (!f._optional && propDef.type === 'string' && propDef.minLength === undefined) {
+        propDef = { ...propDef, minLength: 1 }
+      }
+      properties[key] = propDef
       if (!f._optional) required.push(key)
     }
 
@@ -363,9 +372,9 @@ export const s = {
       type: 'object',
       properties: {
         format: { type: 'string', const: 'pdf-reference' },
-        file:   { type: 'string', format: 'z3t-file-uri' },
-        page:   { type: 'integer' },
-        hint:   { type: 'string' },
+        file: { type: 'string', format: 'z3t-file-uri' },
+        page: { type: 'integer' },
+        hint: { type: 'string' },
       },
       required: ['format', 'file'],
       'x-z3t-display': 'pdf-reference',
@@ -380,7 +389,7 @@ export const s = {
       type: 'object',
       properties: {
         format: { type: 'string', enum: ['text', 'markdown', 'number', 'date', 'boolean', 'enum'] },
-        value:  { type: 'string' },
+        value: { type: 'string' },
       },
       required: ['format', 'value'],
       'x-z3t-display': 'typed-value',
