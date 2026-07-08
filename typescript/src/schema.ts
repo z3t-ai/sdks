@@ -8,7 +8,7 @@ export class SchemaField<T> {
   constructor(
     readonly _def: Record<string, unknown>,
     readonly _optional: boolean = false,
-  ) {}
+  ) { }
 
   /** Mark this field as optional. The handler's input type will reflect the field as `T | undefined`. */
   optional(): SchemaField<T | undefined> {
@@ -45,6 +45,8 @@ interface BaseOptions {
   order?: number
   /** Visual grouping label for adjacent fields */
   group?: string
+  /** Default value */
+  default?: unknown
 }
 
 interface StringOptions extends BaseOptions {
@@ -77,11 +79,18 @@ interface EnumOptions extends BaseOptions {
   colorMap?: Record<string, string>
 }
 
+interface ObjectOptions extends BaseOptions {
+  /** Explicit row arrangement: each entry is a field name (full-width) or an array of field names (side by side in that row). Takes precedence over `columns`. */
+  layout?: Array<string | string[]>
+  /** Simple multi-column flow grid — fields appear in schema order. Ignored when `layout` is set. */
+  columns?: number
+}
+
 interface ArrayOptions extends BaseOptions {
   minItems?: number
   maxItems?: number
-  /** Render array-of-object output as a sortable table or source-reference list */
-  display?: 'table'
+  /** How to arrange the array items in output: table, grid, gallery, or list (default) */
+  layout?: 'table' | 'list' | 'grid' | 'gallery'
   sortable?: boolean
   searchable?: boolean
 }
@@ -136,12 +145,12 @@ export interface TypedValue {
 }
 
 export const TypedValue = {
-  text:     (value: string): TypedValue => ({ format: 'text',     value }),
+  text: (value: string): TypedValue => ({ format: 'text', value }),
   markdown: (value: string): TypedValue => ({ format: 'markdown', value }),
-  number:   (value: string): TypedValue => ({ format: 'number',   value }),
-  date:     (value: string): TypedValue => ({ format: 'date',     value }),
-  boolean:  (value: string): TypedValue => ({ format: 'boolean',  value }),
-  enum:     (value: string): TypedValue => ({ format: 'enum',     value }),
+  number: (value: string): TypedValue => ({ format: 'number', value }),
+  date: (value: string): TypedValue => ({ format: 'date', value }),
+  boolean: (value: string): TypedValue => ({ format: 'boolean', value }),
+  enum: (value: string): TypedValue => ({ format: 'enum', value }),
 }
 
 // ─── Internal helpers ──────────────────────────────────────────────────────
@@ -153,6 +162,7 @@ function meta(opts: BaseOptions): Record<string, unknown> {
   if (opts.hint !== undefined) out['x-z3t-hint'] = opts.hint
   if (opts.order !== undefined) out['x-z3t-order'] = opts.order
   if (opts.group !== undefined) out['x-z3t-group'] = opts.group
+  if (opts.default !== undefined) out.default = opts.default
   return out
 }
 
@@ -238,18 +248,29 @@ export const s = {
 
   object<T extends Record<string, SchemaField<unknown>>>(
     shape: T,
-    opts: BaseOptions = {},
+    opts: ObjectOptions = {},
   ): SchemaField<InferShape<T>> {
     const properties: Record<string, unknown> = {}
     const required: string[] = []
 
     for (const [key, f] of Object.entries(shape)) {
-      properties[key] = f._def
+      // JSON Schema `required` only checks key presence, not non-emptiness — `""` satisfies it.
+      // Add minLength: 1 to required string fields so AJV also rejects empty strings.
+      let propDef = f._def
+      if (!f._optional && propDef.type === 'string' && propDef.minLength === undefined) {
+        propDef = { ...propDef, minLength: 1 }
+      }
+      properties[key] = propDef
       if (!f._optional) required.push(key)
     }
 
     const def: Record<string, unknown> = { type: 'object', properties, ...meta(opts) }
     if (required.length > 0) def.required = required
+    if (opts.layout !== undefined) {
+      def['x-z3t-layout'] = { type: 'grid', rows: opts.layout }
+    } else if (opts.columns !== undefined) {
+      def['x-z3t-layout'] = { type: 'grid', columns: opts.columns }
+    }
 
     return field<InferShape<T>>(def)
   },
@@ -259,12 +280,16 @@ export const s = {
     if (opts.minItems !== undefined) def.minItems = opts.minItems
     if (opts.maxItems !== undefined) def.maxItems = opts.maxItems
 
-    // Output: array of file downloads → z3t-file-list format
-    if (item._def['format'] === 'z3t-file-output') def.format = 'z3t-file-list'
-    // Output: array of objects → table format or source-reference list
-    if (opts.display === 'table') def.format = 'table'
-if (opts.sortable) def['x-z3t-table-sortable'] = true
-    if (opts.searchable) def['x-z3t-table-searchable'] = true
+    if (item._def['x-z3t-display'] === 'file-output') {
+      def['x-z3t-layout'] = { type: 'file-list' }
+    } else if (opts.layout === 'table') {
+      const layout: Record<string, unknown> = { type: 'table' }
+      if (opts.sortable) layout.sortable = true
+      if (opts.searchable) layout.searchable = true
+      def['x-z3t-layout'] = layout
+    } else if (opts.layout) {
+      def['x-z3t-layout'] = { type: opts.layout }
+    }
 
     return field<Exclude<T, undefined>[]>(def)
   },
@@ -305,39 +330,39 @@ if (opts.sortable) def['x-z3t-table-sortable'] = true
 
   /** Output rendered as Markdown */
   markdown(opts: BaseOptions = {}): SchemaField<string> {
-    return field<string>({ type: 'string', format: 'markdown', ...meta(opts) })
+    return field<string>({ type: 'string', 'x-z3t-display': 'markdown', ...meta(opts) })
   },
 
   /** Output rendered as sanitized HTML */
   html(opts: BaseOptions = {}): SchemaField<string> {
-    return field<string>({ type: 'string', format: 'html', ...meta(opts) })
+    return field<string>({ type: 'string', 'x-z3t-display': 'html', ...meta(opts) })
   },
 
   /** Output rendered as a syntax-highlighted code block */
   code(opts: CodeOptions = {}): SchemaField<string> {
-    const def: Record<string, unknown> = { type: 'string', format: 'code', ...meta(opts) }
+    const def: Record<string, unknown> = { type: 'string', 'x-z3t-display': 'code', ...meta(opts) }
     if (opts.language) def['x-z3t-code-language'] = opts.language
     return field<string>(def)
   },
 
   /** Output rendered as a syntax-highlighted JSON block */
   json(opts: BaseOptions = {}): SchemaField<string> {
-    return field<string>({ type: 'string', format: 'json', ...meta(opts) })
+    return field<string>({ type: 'string', 'x-z3t-display': 'json', ...meta(opts) })
   },
 
   /** Output rendered as an inline image */
   image(opts: BaseOptions = {}): SchemaField<string> {
-    return field<string>({ type: 'string', format: 'image', ...meta(opts) })
+    return field<string>({ type: 'string', 'x-z3t-display': 'image', ...meta(opts) })
   },
 
   /** Output rendered as a percentage bar (value must be 0–1) */
   percent(opts: BaseOptions = {}): SchemaField<number> {
-    return field<number>({ type: 'number', format: 'percent', ...meta(opts) })
+    return field<number>({ type: 'number', 'x-z3t-display': 'percent', ...meta(opts) })
   },
 
   /** Agent-produced file — rendered as a download button */
   fileOutput(opts: BaseOptions = {}): SchemaField<string> {
-    return field<string>({ type: 'string', format: 'z3t-file-output', ...meta(opts) })
+    return field<string>({ type: 'string', 'x-z3t-display': 'file-output', ...meta(opts) })
   },
 
   /** PDF source reference — rendered as a clickable chip that opens a PDF preview modal.
@@ -347,9 +372,9 @@ if (opts.sortable) def['x-z3t-table-sortable'] = true
       type: 'object',
       properties: {
         format: { type: 'string', const: 'pdf-reference' },
-        file:   { type: 'string', format: 'z3t-file-uri' },
-        page:   { type: 'integer' },
-        hint:   { type: 'string' },
+        file: { type: 'string', format: 'z3t-file-uri' },
+        page: { type: 'integer' },
+        hint: { type: 'string' },
       },
       required: ['format', 'file'],
       'x-z3t-display': 'pdf-reference',
@@ -364,7 +389,7 @@ if (opts.sortable) def['x-z3t-table-sortable'] = true
       type: 'object',
       properties: {
         format: { type: 'string', enum: ['text', 'markdown', 'number', 'date', 'boolean', 'enum'] },
-        value:  { type: 'string' },
+        value: { type: 'string' },
       },
       required: ['format', 'value'],
       'x-z3t-display': 'typed-value',

@@ -20,6 +20,24 @@ def test_object_omits_required_key_when_all_optional():
     assert "required" not in obj._def
 
 
+def test_object_layout_rows():
+    field = s.object(
+        {"title": s.string(), "confidence": s.number(), "sources": s.array(s.string()), "summary": s.markdown()},
+        layout=["title", ["confidence", "sources"], "summary"],
+    )
+    assert field._def["x-z3t-layout"] == {"type": "grid", "rows": ["title", ["confidence", "sources"], "summary"]}
+
+
+def test_object_layout_columns():
+    field = s.object({"a": s.string(), "b": s.string()}, columns=2)
+    assert field._def["x-z3t-layout"] == {"type": "grid", "columns": 2}
+
+
+def test_object_layout_takes_precedence_over_columns():
+    field = s.object({"a": s.string()}, layout=["a"], columns=3)
+    assert field._def["x-z3t-layout"] == {"type": "grid", "rows": ["a"]}
+
+
 def test_string_display_and_constraints():
     field = s.string(display="textarea", min_length=1, max_length=10, title="Notes")
     assert field._def == {
@@ -51,16 +69,25 @@ def test_file_uri_accept_and_max_size():
     assert field._def["x-z3t-max-size-mb"] == 10
 
 
-def test_array_of_file_output_gets_file_list_format():
+def test_array_of_file_output_gets_file_list_layout():
     field = s.array(s.file_output())
-    assert field._def["format"] == "z3t-file-list"
+    assert field._def["x-z3t-layout"] == {"type": "file-list"}
+    assert "x-z3t-display" not in field._def
+    assert "format" not in field._def
 
 
-def test_array_table_display():
-    field = s.array(s.object({"name": s.string()}), display="table", sortable=True, searchable=True)
-    assert field._def["format"] == "table"
-    assert field._def["x-z3t-table-sortable"] is True
-    assert field._def["x-z3t-table-searchable"] is True
+def test_array_table_layout():
+    field = s.array(s.object({"name": s.string()}), layout="table", sortable=True, searchable=True)
+    assert field._def["x-z3t-layout"] == {"type": "table", "sortable": True, "searchable": True}
+    assert "x-z3t-display" not in field._def
+    assert "x-z3t-table-sortable" not in field._def
+    assert "x-z3t-table-searchable" not in field._def
+    assert "format" not in field._def
+
+
+def test_array_other_layouts():
+    assert s.array(s.image(), layout="gallery")._def["x-z3t-layout"] == {"type": "gallery"}
+    assert s.array(s.string(), layout="grid")._def["x-z3t-layout"] == {"type": "grid"}
 
 
 def test_pdf_reference_field_shape():
@@ -135,11 +162,13 @@ def test_taxonomy_ref_and_integration_ref():
     assert integ._def["x-z3t-integration-provider"] == "salesforce"
 
 
-def test_output_only_field_formats():
-    assert s.html()._def["format"] == "html"
-    assert s.code(language="python")._def == {"type": "string", "format": "code", "x-z3t-code-language": "python"}
-    assert s.json()._def["format"] == "json"
-    assert s.image()._def["format"] == "image"
-    assert s.percent()._def == {"type": "number", "format": "percent"}
-    assert s.file_output()._def["format"] == "z3t-file-output"
-    assert s.markdown()._def["format"] == "markdown"
+def test_output_only_field_displays():
+    for name, field in [("html", s.html()), ("json", s.json()), ("image", s.image()), ("markdown", s.markdown())]:
+        assert field._def["x-z3t-display"] == name, f"{name} should set x-z3t-display"
+        assert "format" not in field._def, f"{name} should not set format"
+    assert s.code(language="python")._def == {"type": "string", "x-z3t-display": "code", "x-z3t-code-language": "python"}
+    assert "format" not in s.code(language="python")._def
+    assert s.percent()._def == {"type": "number", "x-z3t-display": "percent"}
+    assert "format" not in s.percent()._def
+    assert s.file_output()._def == {"type": "string", "x-z3t-display": "file-output"}
+    assert "format" not in s.file_output()._def

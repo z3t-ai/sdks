@@ -350,19 +350,16 @@ builder ergonomics are yours to design (see §14).
 `enum`, `const`, `format`, `minimum`/`maximum`, `minLength`/`maxLength`, `pattern`,
 `minItems`/`maxItems`, `multipleOf`, `title`, `description`.
 
-**`format` values the platform interprets specially:**
+**`format` values the platform uses** (`format` is only valid on `type: "string"` and only for validated constraints):
 
-| `format`                                    | Meaning                                                                             |
-| ------------------------------------------- | ----------------------------------------------------------------------------------- |
-| `email`, `uri`, `date`, `date-time`         | Standard JSON Schema formats                                                        |
-| `z3t-file-uri`                              | Input: file upload picker; value resolves to `z3t://files/{id}`                     |
-| `z3t-taxonomy-ref`                          | Input: taxonomy dropdown; value resolves to `z3t://taxonomies/{id}`                 |
-| `z3t-integration-ref`                       | Input: integration dropdown; value resolves to `z3t://integrations/{id}`            |
-| `markdown`, `html`, `code`, `json`, `image` | Output rendering                                                                    |
-| `percent`                                   | Output: percentage bar; value must be `0–1`                                         |
-| `z3t-file-output`                           | Output: download button                                                             |
-| `z3t-file-list`                             | Output: auto-applied to an array whose `items` is `z3t-file-output`                 |
-| `table`                                     | Output: applied to an array of objects when the array option requests table display |
+| `format`                            | Meaning                                                              |
+| ----------------------------------- | -------------------------------------------------------------------- |
+| `email`, `uri`, `date`, `date-time` | Standard JSON Schema formats — Ajv validates these                   |
+| `z3t-file-uri`                      | Input: file upload picker; value must start with `z3t://files/`      |
+| `z3t-taxonomy-ref`                  | Input: taxonomy dropdown; value must start with `z3t://taxonomies/`  |
+| `z3t-integration-ref`               | Input: integration dropdown; value must start with `z3t://integrations/` |
+
+Do not use `format` for display hints. Values like `markdown`, `html`, `code`, `json`, `image`, `percent`, and `z3t-file-output` were used as `format` values in earlier SDK versions and are still accepted by the backend for backwards compatibility, but new SDKs must emit them as `x-z3t-display` instead.
 
 **`x-z3t-*` extension keys:**
 
@@ -371,15 +368,36 @@ builder ergonomics are yours to design (see §14).
 | `x-z3t-hint`                                      | any field                         | Short inline helper text below the field                                                                                                                            |
 | `x-z3t-order`                                     | any field                         | Explicit sort order in the rendered form                                                                                                                            |
 | `x-z3t-group`                                     | any field                         | Visual grouping label for adjacent fields                                                                                                                           |
-| `x-z3t-display`                                   | varies                            | `'textarea'\|'markdown'\|'code'\|'hidden'` (string), `'range'` (number/integer — builder exposes this as a `slider` option), `'toggle'` (boolean), `'radio'` (enum) |
-| `x-z3t-code-language`                             | string with `code` display/format | Syntax highlight language                                                                                                                                           |
+| `x-z3t-display`                                   | varies                            | See table below                                                                                                                                                     |
+| `x-z3t-code-language`                             | string with `x-z3t-display: 'code'` | Syntax highlight language                                                                                                                                         |
 | `x-z3t-min` / `x-z3t-max`                         | date/datetime                     | JSON Schema's `date`/`date-time` formats have no native bounds, so these carry min/max as strings                                                                   |
 | `x-z3t-color-map`                                 | enum                              | `{ VALUE: 'colorName' }` badge color mapping for output rendering                                                                                                   |
 | `x-z3t-accept`                                    | `z3t-file-uri`                    | Accepted MIME types array                                                                                                                                           |
 | `x-z3t-max-size-mb`                               | `z3t-file-uri`                    | UI hint for max upload size                                                                                                                                         |
 | `x-z3t-taxonomy-slug`                             | `z3t-taxonomy-ref`                | Pre-select a specific taxonomy                                                                                                                                      |
 | `x-z3t-integration-provider`                      | `z3t-integration-ref`             | Filter dropdown to one provider                                                                                                                                     |
-| `x-z3t-table-sortable` / `x-z3t-table-searchable` | array with `table` format         | Table interaction flags                                                                                                                                             |
+| `x-z3t-table-sortable` / `x-z3t-table-searchable` | array with `x-z3t-display: 'table'` | Table interaction flags                                                                                                                                           |
+
+**`x-z3t-display` values:**
+
+| Value | Field type | Effect |
+| --- | --- | --- |
+| `'textarea'` | `string` | Multi-line text input (form) |
+| `'markdown'` | `string` | Markdown editor (form) / rendered Markdown (output) |
+| `'html'` | `string` | Rendered sanitized HTML (output) |
+| `'code'` | `string` | Code editor (form) / syntax-highlighted block (output); use with `x-z3t-code-language` |
+| `'json'` | `string` | Pretty-printed JSON block (output) |
+| `'image'` | `string` | Inline image (output); value is a URL or `z3t://files/{id}` |
+| `'hidden'` | `string` | Field hidden in the form |
+| `'range'` | `number` / `integer` | Slider input (form) |
+| `'percent'` | `number` | Percentage bar (output); value must be `0–1` |
+| `'toggle'` | `boolean` | Toggle switch (form) |
+| `'radio'` | `enum` | Radio buttons instead of dropdown (form) |
+| `'table'` | `array` | Sortable/searchable table (output) |
+| `'file-list'` | `array` | List of download links for file URI items (output) |
+| `'file-output'` | `string` | Agent-produced file — download button (output) |
+| `'pdf-reference'` | `object` | Clickable chip that opens a PDF preview |
+| `'typed-value'` | `object` | Self-describing `{ format, value }` rendered by inner format |
 
 **Two composite value shapes** the platform renders specially. Both the _runtime
 value_ a handler returns and the _schema field declaration_ that advertises it are

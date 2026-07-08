@@ -143,10 +143,45 @@ are keyword arguments here (`s.string(title=...)`).
 | `s.image()` | Inline image |
 | `s.percent()` | Percentage bar (value 0–1) |
 | `s.file_output()` | Download button |
-| `s.array(s.file_output())` | Auto-detected as a file list |
-| `s.array(s.object({...}), display="table")` | Sortable/searchable table |
+| `s.array(s.file_output())` | Download link list (auto-detected) |
+| `s.array(s.object({...}), layout="table")` | Data table with column headers |
+| `s.array(s.image(), layout="gallery")` | Equal-sized image tile grid |
+| `s.array(s.object({...}), layout="grid")` | Multi-column card grid |
+| `s.array(s.object({...}))` | Vertical card list (default) |
+| `s.object({...})` | Key-value detail card |
+| `s.object({...}, columns=2)` | Fields arranged in a 2-column grid |
 | `s.pdf_reference()` | Clickable chip → PDF preview modal — construct values with `pdf_reference(file, page=..., hint=...)` |
 | `s.typed_value()` | Frontend picks renderer from `format` — construct values with `typed_value.markdown(str)`, `typed_value.number(str)`, etc. |
+
+### Array layouts
+
+Pass `layout` to `s.array()` to control how the output is rendered. The default (no `layout`) stacks items vertically as cards.
+
+```python
+# Table — columns from object properties; add sortable/searchable for interactivity
+results=s.array(s.object({
+    "name":   s.string(title="Name"),
+    "score":  s.number(title="Score"),
+    "status": s.enum(["pass", "fail"], title="Status", color_map={"pass": "green", "fail": "red"}),
+}), layout="table", sortable=True, searchable=True, title="Results")
+
+# Gallery — equal-sized image tiles; use with s.image()
+images=s.array(s.image(), layout="gallery", title="Generated images")
+
+# Grid — compact multi-column cards; good for product/people lists
+products=s.array(s.object({
+    "name":  s.string(title="Product"),
+    "price": s.number(title="Price"),
+}), layout="grid", title="Products")
+
+# Vertical card list (default) — each item fully expanded, stacked
+items=s.array(s.object({...}))
+
+# File download list — automatic when items are s.file_output(); no layout= needed
+reports=s.array(s.file_output(), title="Reports")
+```
+
+---
 
 ### Versioning lifecycle
 

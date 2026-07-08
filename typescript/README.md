@@ -16,7 +16,7 @@ npm install @z3t-ai/agent-sdk
 Peer dependencies — install whichever LLM providers your agent uses:
 
 ```bash
-npm install openai @anthropic-ai/sdk @google/generative-ai
+npm install openai @anthropic-ai/sdk @google/genai
 ```
 
 ---
@@ -109,12 +109,45 @@ Every field is **required by default**. Call `.optional()` to make it optional.
 | `s.boolean()` | ✓ / ✗ badge |
 | `s.enum([...] as const, { colorMap: { A: 'green' } })` | Coloured status badge |
 | `s.fileOutput()` | Download button |
-| `s.array(s.fileOutput())` | Multiple download buttons |
-| `s.array(s.object({...}), { display: 'table' })` | Sortable data table |
-| `s.array(s.object({...}))` | Card list |
+| `s.array(s.fileOutput())` | Download link list (auto-detected) |
+| `s.array(s.object({...}), { layout: 'table' })` | Data table with column headers |
+| `s.array(s.image(), { layout: 'gallery' })` | Equal-sized image tile grid |
+| `s.array(s.object({...}), { layout: 'grid' })` | Multi-column card grid |
+| `s.array(s.object({...}))` | Vertical card list (default) |
 | `s.object({...})` | Key-value detail card |
+| `s.object({...}, { columns: 2 })` | Fields arranged in a 2-column grid |
 | `s.pdfReference()` | Clickable chip → PDF preview modal — construct values with `PdfReference.create({ file, page?, hint? })` |
 | `s.typedValue()` | Frontend picks renderer from `format` — construct values with `TypedValue.markdown(str)`, `TypedValue.number(str)`, etc. |
+
+### Array layouts
+
+Pass `layout` to `s.array()` to control how the output is rendered. The default (no `layout`) stacks items vertically as cards.
+
+```typescript
+// Table — columns from object properties; add sortable/searchable for interactivity
+results: s.array(s.object({
+  name:   s.string({ title: 'Name' }),
+  score:  s.number({ title: 'Score' }),
+  status: s.enum(['pass', 'fail'] as const, { title: 'Status', colorMap: { pass: 'green', fail: 'red' } }),
+}), { layout: 'table', sortable: true, searchable: true, title: 'Results' })
+
+// Gallery — equal-sized image tiles; use with s.image()
+images: s.array(s.image(), { layout: 'gallery', title: 'Generated images' })
+
+// Grid — compact multi-column cards; good for product/people lists
+products: s.array(s.object({
+  name:  s.string({ title: 'Product' }),
+  price: s.number({ title: 'Price' }),
+}), { layout: 'grid', title: 'Products' })
+
+// Vertical card list (default) — each item fully expanded, stacked
+items: s.array(s.object({ ... }))
+
+// File download list — automatic when items are s.fileOutput(); no layout: needed
+reports: s.array(s.fileOutput(), { title: 'Reports' })
+```
+
+---
 
 ### Common metadata (all fields)
 
@@ -237,8 +270,11 @@ const response = await ctx.llm.anthropic.messages.create({
 })
 
 // Google
-const model = ctx.llm.google.getGenerativeModel({ model: 'gemini-1.5-pro' })
-const response = await model.generateContent('Hello')
+const response = await ctx.llm.google.models.generateContent({
+  model: 'gemini-2.0-flash',
+  contents: 'Hello',
+})
+console.log(response.text)
 ```
 
 ### Agent-to-agent calls

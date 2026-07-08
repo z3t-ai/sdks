@@ -1,6 +1,6 @@
 import type OpenAI from 'openai'
 import type Anthropic from '@anthropic-ai/sdk'
-import type { GoogleGenerativeAI } from '@google/generative-ai'
+import type { GoogleGenAI } from '@google/genai'
 
 export interface AgentConfig {
   /** Agent API key from the z3t dashboard */
@@ -75,7 +75,7 @@ export interface CallContext {
     /** Pre-configured Anthropic client pointing to the z3t LLM proxy */
     anthropic: Anthropic
     /** Pre-configured Google AI client pointing to the z3t LLM proxy */
-    google: GoogleGenerativeAI
+    google: GoogleGenAI
   }
 
   agents: {
