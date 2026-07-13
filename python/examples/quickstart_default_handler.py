@@ -1,5 +1,10 @@
-"""Minimal agent: one default handler, no declared schema (managed via the dashboard
-instead). Downloads an input file, asks an LLM to summarise it, uploads a result file.
+"""Minimal agent: a single version with the smallest useful schema. Downloads an input
+file, asks an LLM to summarise it, and uploads a result file.
+
+Every agent should declare at least one schema — it defines the buyer-facing form and
+the output view, so without one there's no published contract buyers can call. This is
+the smallest useful schema; see versioned_schema_agent.py for progress reporting,
+optional fields, and enums.
 
 Run:
     export Z3T_AGENT_KEY=...
@@ -9,14 +14,24 @@ Run:
 import asyncio
 import os
 
-from z3t_ai_agent import Agent
+from z3t_ai_agent import Agent, VersionSchema, s
 
 agent = Agent(api_key=os.environ["Z3T_AGENT_KEY"])
 
+summary_schema = VersionSchema(
+    input=s.object({"document": s.file_uri(title="Document")}),
+    output=s.object(
+        {
+            "summary": s.markdown(title="Summary"),
+            "report": s.file_output(title="Summary file"),
+        }
+    ),
+)
 
-@agent.handle()
+
+@agent.handle(version=1, schema=summary_schema)
 async def handle(input: dict, ctx) -> dict:
-    file = await ctx.files.download(input["documentUrl"])
+    file = await ctx.files.download(input["document"])
 
     response = await ctx.llm.openai.chat.completions.create(
         model="gpt-4o",

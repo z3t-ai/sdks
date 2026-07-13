@@ -53,10 +53,13 @@ export class Agent {
    */
   handle<I, O>(version: number, schema: VersionSchema<I, O>, handler: Handler<I, O>): this
 
-  /** Register a versioned handler without a schema (schema managed via dashboard). */
+  /** Register a versioned handler without an inline schema. Runs for that version but
+   *  declares no schema itself — the version's schema must already exist (declared on a
+   *  previous run, or by another handler). */
   handle(version: number, handler: Handler): this
 
-  /** Register a default handler that handles all schema versions (schema managed via dashboard). */
+  /** Register a default handler that runs for every schema version. Declares no schema
+   *  itself — provide one via the versioned `handle(version, schema, handler)` overload. */
   handle(handler: Handler): this
 
   handle(

@@ -3,7 +3,6 @@
 Python SDK for building agents on the [z3t.ai](https://z3t.ai) platform.
 
 This is the Python counterpart to [`@z3t-ai/agent-sdk`](../typescript/) — same wire/HTTP contract.
-the same wire/HTTP contract.
 
 > **Units differ from the TypeScript SDK.** Durations here (`timeout`,
 > `reconnect_delay`, `max_reconnect_delay`) are in **seconds**, not milliseconds, to
@@ -86,6 +85,48 @@ taxonomy-driven mapping agent, and an agent-to-agent chaining example.
 
 ---
 
+## From your machine to the marketplace
+
+Writing the handler is only half the job — here's how you connect it to the
+platform, test it privately, and publish it.
+
+**1. Create the agent in the dashboard.** In the [z3t.ai](https://z3t.ai) app, go
+to **Developer → Agents → New agent** and fill in its name, description, category,
+and pricing. A new agent starts **private** — only your organization (and any orgs
+you explicitly grant access) can see or call it.
+
+**2. Create an agent key.** Open the agent and, under **API Keys**, create a key.
+The raw key is shown **once** — copy it and set it as the environment variable your
+process reads:
+
+```bash
+export Z3T_AGENT_KEY="z3t_agentkey_..."
+```
+
+Each key authenticates exactly one agent. Rotate or revoke keys from the same panel.
+
+**3. Run and test privately.** Start your process (`asyncio.run(agent.start())`). It
+connects to the relay and — if you declared schemas with `s.*` — registers each
+version as **`draft`** (see [Versioning lifecycle](#versioning-lifecycle)). While the
+agent is private you can run test calls against it yourself from the dashboard (the
+**Test** action on a schema version, which works on drafts too) without it being
+visible to anyone else. Iterate freely: draft schemas are mutable, so restart as
+often as you like.
+
+**4. Publish.** When you're happy:
+- set `status="active"` on the `VersionSchema` and restart — this freezes and
+  publishes the contract; **and**
+- switch the agent's **visibility to Public** in the dashboard to list it in the
+  marketplace. (Going public also requires accepting the Creator Terms and completing
+  payout onboarding.)
+
+These two axes are independent: schema `status` (`draft` → `active`) controls whether
+the *contract* is published; agent *visibility* (`private` → `public`) controls whether
+the *agent* is listed. A public agent still needs at least one `active` version before
+consumers can call it.
+
+---
+
 ## Registering handlers
 
 `Agent.handle()` is a decorator factory:
@@ -128,7 +169,7 @@ are keyword arguments here (`s.string(title=...)`).
 | `s.file_uri()` | File upload picker | `accept` (MIME list), `max_size_mb` |
 | `s.array(s.file_uri())` | Multi-file upload | `min_items`, `max_items` |
 | `s.taxonomy_ref()` | Taxonomy dropdown | `taxonomy_slug` |
-| `s.integration_ref()` | Integration dropdown | `provider` |
+| `s.integration_ref()` ⚠️ | Integration dropdown — **coming soon, vault not yet available** | `provider` |
 
 ### Output fields
 
@@ -185,16 +226,34 @@ reports=s.array(s.file_output(), title="Reports")
 
 ### Versioning lifecycle
 
+Every declared schema carries a **status**. It's synced to the platform on
+`agent.start()`:
+
+| Status | Visible to consumers? | Mutable? | Use when |
+|---|---|---|---|
+| `"draft"` *(default)* | No | Yes — resync freely on every restart | Building and testing a version |
+| `"active"` | Yes — published | No — frozen once active | Ready to publish the contract |
+
 ```python
 VersionSchema(
     input=...,
     output=...,
-    status="draft",          # default — mutable, invisible to consumers
-    # status="active",       # publishes and freezes the schema
-    deprecates=[1],          # optional — versions this one replaces
-    deprecation_notice="...",
+    status="draft",              # default — mutable, invisible to consumers
+    # status="active",           # publishes and freezes the schema
+    deprecates=[1],              # optional — earlier versions this one replaces
+    deprecation_notice="v1 is replaced by v2. Add `language` and send `documents` as a list.",
 )
 ```
+
+On `agent.start()` the SDK:
+- **creates new versions** (as `draft` unless you pass `status="active"`),
+- **deprecates** every version listed in `deprecates` — those versions keep working,
+  but their consumers are notified and shown your `deprecation_notice`,
+- **rejects the restart** if you change the schema of an already-`active` version
+  (active schemas are immutable). Draft versions are yours to change.
+
+Any version that syncs back as `draft` is logged on startup, so you always know which
+versions aren't publicly visible yet.
 
 ---
 
@@ -210,7 +269,7 @@ Passed as the second argument to every handler.
 | `ctx.files.upload(data, filename, mime_type)` | `async -> str` | Returns the new `z3t://files/{id}` URI |
 | `ctx.taxonomies.entries(uri)` | `async -> list[TaxonomyEntry]` | — |
 | `ctx.taxonomies.lookup(uri, key)` | `async -> TaxonomyEntry \| None` | `None` on not-found |
-| `ctx.integrations.credentials(uri)` | `async -> dict[str, str]` | Shape depends on the integration's auth type |
+| `ctx.integrations.credentials(uri)` ⚠️ | `async -> dict[str, str]` | **Coming soon — vault not yet available.** Shape depends on the integration's auth type |
 | `ctx.llm.openai` / `.anthropic` / `.google` | client instances or `None` | `None` if the optional provider package isn't installed |
 | `ctx.agents.call(agent_id, plan_id, input, *, schema_version=None, consumer_org_id=None, timeout=None)` | `async -> Any` | `timeout` in seconds; always suppresses progress events on the downstream call |
 
