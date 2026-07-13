@@ -67,6 +67,48 @@ agent.start()
 
 ---
 
+## From your machine to the marketplace
+
+Writing the handler is only half the job — here's how you connect it to the
+platform, test it privately, and publish it.
+
+**1. Create the agent in the dashboard.** In the [z3t.ai](https://z3t.ai) app, go
+to **Developer → Agents → New agent** and fill in its name, description, category,
+and pricing. A new agent starts **private** — only your organization (and any orgs
+you explicitly grant access) can see or call it.
+
+**2. Create an agent key.** Open the agent and, under **API Keys**, create a key.
+The raw key is shown **once** — copy it and set it as the environment variable your
+process reads:
+
+```bash
+export Z3T_AGENT_KEY="z3t_agentkey_..."
+```
+
+Each key authenticates exactly one agent. Rotate or revoke keys from the same panel.
+
+**3. Run and test privately.** Start your process (`agent.start()`). It connects to
+the relay and — if you declared schemas with `s.*` — registers each version as
+**`draft`** (see [Schema versions and status](#schema-versions-and-status)). While
+the agent is private you can run test calls against it yourself from the dashboard
+(the **Test** action on a schema version, which works on drafts too) without it being
+visible to anyone else. Iterate freely: draft schemas are mutable, so restart as
+often as you like.
+
+**4. Publish.** When you're happy:
+- set `status: 'active'` on the version and restart — this freezes and publishes the
+  contract; **and**
+- switch the agent's **visibility to Public** in the dashboard to list it in the
+  marketplace. (Going public also requires accepting the Creator Terms and completing
+  payout onboarding.)
+
+These two axes are independent: schema `status` (`draft` → `active`) controls whether
+the *contract* is published; agent *visibility* (`private` → `public`) controls whether
+the *agent* is listed. A public agent still needs at least one `active` version before
+consumers can call it.
+
+---
+
 ## Schema builder (`s`)
 
 Every field is **required by default**. Call `.optional()` to make it optional.
@@ -91,7 +133,7 @@ Every field is **required by default**. Call `.optional()` to make it optional.
 | `s.fileUri()` | File upload picker | `accept` (MIME list), `maxSizeMb` |
 | `s.array(s.fileUri())` | Multi-file upload | `minItems`, `maxItems` |
 | `s.taxonomyRef()` | Taxonomy dropdown | `taxonomySlug` |
-| `s.integrationRef()` | Integration dropdown | `provider` |
+| `s.integrationRef()` ⚠️ | Integration dropdown — **coming soon, vault not yet available** | `provider` |
 
 ### Output fields
 
@@ -163,12 +205,25 @@ s.string({
 
 ---
 
-## Multiple schema versions
+## Schema versions and status
 
-Use versioned handlers when your agent's input/output contract changes. On `agent.start()` the SDK automatically:
-- Registers new versions with the platform
-- Marks versions you no longer handle as **deprecated** (consumers are notified)
-- Rejects startup if you try to change an existing version's schema (schemas are immutable once published)
+Use versioned handlers when your agent's input/output contract changes. Every
+declared schema carries a **status**:
+
+| Status | Visible to consumers? | Mutable? | Use when |
+|---|---|---|---|
+| `'draft'` *(default)* | No | Yes — resync freely on every restart | Building and testing a version |
+| `'active'` | Yes — published | No — frozen once active | Ready to publish the contract |
+
+On `agent.start()` the SDK syncs your declared schemas to the platform:
+- **new versions** are created (as `draft` unless you set `status: 'active'`),
+- every version listed in **`deprecates`** is marked deprecated — those versions keep
+  working, but their consumers are notified and shown your `deprecationNotice`,
+- changing an **already-`active`** version's schema is rejected — active schemas are
+  immutable. Draft versions are yours to change.
+
+Any version that syncs back as `draft` is logged on startup, so you always know which
+versions aren't publicly visible yet.
 
 ```typescript
 agent.handle(1, {
@@ -187,7 +242,8 @@ agent.handle(2, {
     summary: s.markdown(),
     reports: s.array(s.fileOutput()),
   }),
-  deprecates:        [1],
+  status:            'active',   // publish v2 (default is 'draft')
+  deprecates:        [1],        // v1 is superseded — its consumers see the notice below
   deprecationNotice: 'v1 is replaced by v2. Add the `language` field and change `document` to `documents`.',
 }, async (input, ctx) => {
   // v2 handler — input.documents is string[]
@@ -241,7 +297,12 @@ const entry = await ctx.taxonomies.lookup(input.categoryMapping, 'RAW_KEY')
 // null if not found
 ```
 
-### Integrations (credentials vault)
+### Integrations (credentials vault) ⚠️ coming soon
+
+> **Not yet available.** `s.integrationRef()` and `ctx.integrations.credentials()`
+> are part of the SDK surface, but the platform vault that backs them isn't live yet.
+> The shape below is stable and safe to read ahead of time; it won't resolve real
+> credentials until the vault ships.
 
 ```typescript
 // Resolve decrypted credentials for a connected integration

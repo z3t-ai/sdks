@@ -9,12 +9,42 @@ Run:
 import asyncio
 import os
 
-from z3t_ai_agent import Agent
+from z3t_ai_agent import Agent, VersionSchema, s
 
 agent = Agent(api_key=os.environ["Z3T_AGENT_KEY"])
 
+mapping_schema = VersionSchema(
+    input=s.object(
+        {
+            "columnMapping": s.taxonomy_ref(title="Category mapping"),
+            "rows": s.array(
+                s.object({"rawCategory": s.string(title="Raw category")}),
+                title="Rows",
+            ),
+        }
+    ),
+    output=s.object(
+        {
+            "rows": s.array(
+                s.object(
+                    {
+                        "rawCategory": s.string(title="Raw category"),
+                        "category": s.string(title="Mapped category"),
+                    }
+                ),
+                layout="table",
+                title="Mapped rows",
+            ),
+            "unmapped": s.array(
+                s.object({"rawCategory": s.string(title="Raw category")}),
+                title="Unmapped",
+            ),
+        }
+    ),
+)
 
-@agent.handle()
+
+@agent.handle(version=1, schema=mapping_schema)
 async def handle(input: dict, ctx) -> dict:
     # input["columnMapping"] = "z3t://taxonomies/xyz789"
     entries = await ctx.taxonomies.entries(input["columnMapping"])
