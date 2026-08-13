@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { s, SchemaField } from './schema'
+import { s, SchemaField, PdfReference, TypedValue } from './schema'
 import type { Infer, InferShape } from './schema'
 
 describe('s.string()', () => {
@@ -224,6 +224,84 @@ describe('s.percent() / s.fileOutput()', () => {
   it('fileOutput is type: string with x-z3t-display: file-output', () => {
     expect(s.fileOutput()._def).toMatchObject({ type: 'string', 'x-z3t-display': 'file-output' })
     expect(s.fileOutput()._def.format).toBeUndefined()
+  })
+})
+
+describe('s.date() / s.datetime()', () => {
+  it('date sets format: date and no min/max by default', () => {
+    const f = s.date()
+    expect(f._def).toMatchObject({ type: 'string', format: 'date' })
+    expect(f._def['x-z3t-min']).toBeUndefined()
+    expect(f._def['x-z3t-max']).toBeUndefined()
+  })
+
+  it('date carries min and max bounds', () => {
+    const f = s.date({ min: '2020-01-01', max: '2030-12-31' })
+    expect(f._def).toMatchObject({
+      format: 'date',
+      'x-z3t-min': '2020-01-01',
+      'x-z3t-max': '2030-12-31',
+    })
+  })
+
+  it('datetime sets format: date-time and carries bounds', () => {
+    const f = s.datetime({ min: '2020-01-01T00:00:00Z', max: '2030-12-31T23:59:59Z' })
+    expect(f._def).toMatchObject({
+      format: 'date-time',
+      'x-z3t-min': '2020-01-01T00:00:00Z',
+      'x-z3t-max': '2030-12-31T23:59:59Z',
+    })
+  })
+})
+
+describe('s.pdfReference()', () => {
+  it('produces an object schema with x-z3t-display: pdf-reference', () => {
+    const f = s.pdfReference()
+    expect(f._def).toMatchObject({
+      type: 'object',
+      'x-z3t-display': 'pdf-reference',
+      required: ['format', 'file'],
+    })
+    const props = f._def.properties as Record<string, Record<string, unknown>>
+    expect(props.format).toMatchObject({ const: 'pdf-reference' })
+    expect(props.file).toMatchObject({ format: 'z3t-file-uri' })
+    expect(props.page).toMatchObject({ type: 'integer' })
+  })
+
+  it('PdfReference.create builds a runtime value, omitting undefined optionals', () => {
+    expect(PdfReference.create({ file: 'z3t://files/abc' })).toEqual({
+      format: 'pdf-reference',
+      file: 'z3t://files/abc',
+    })
+    expect(PdfReference.create({ file: 'z3t://files/abc', page: 3, hint: 'clause 8' })).toEqual({
+      format: 'pdf-reference',
+      file: 'z3t://files/abc',
+      page: 3,
+      hint: 'clause 8',
+    })
+  })
+})
+
+describe('s.typedValue()', () => {
+  it('produces an object schema with x-z3t-display: typed-value', () => {
+    const f = s.typedValue()
+    expect(f._def).toMatchObject({
+      type: 'object',
+      'x-z3t-display': 'typed-value',
+      required: ['format', 'value'],
+    })
+    const props = f._def.properties as Record<string, Record<string, unknown>>
+    expect(props.format).toMatchObject({ enum: ['text', 'markdown', 'number', 'date', 'boolean', 'enum'] })
+    expect(props.value).toMatchObject({ type: 'string' })
+  })
+
+  it('TypedValue.* helpers build { format, value } runtime values', () => {
+    expect(TypedValue.text('hi')).toEqual({ format: 'text', value: 'hi' })
+    expect(TypedValue.markdown('# h')).toEqual({ format: 'markdown', value: '# h' })
+    expect(TypedValue.number('42')).toEqual({ format: 'number', value: '42' })
+    expect(TypedValue.date('2026-01-01')).toEqual({ format: 'date', value: '2026-01-01' })
+    expect(TypedValue.boolean('true')).toEqual({ format: 'boolean', value: 'true' })
+    expect(TypedValue.enum('A')).toEqual({ format: 'enum', value: 'A' })
   })
 })
 

@@ -16,6 +16,7 @@ function makeConfig(overrides: Partial<ResolvedConfig> = {}): ResolvedConfig {
     maxConcurrentCalls: 10,
     reconnectDelay: 50,
     maxReconnectDelay: 200,
+    heartbeatInterval: 0, // disabled by default in tests; opt in per-test
     logger: silentLogger,
     ...overrides,
   }
@@ -124,6 +125,39 @@ describe('Connection — reconnect', () => {
     conn.start()
 
     await vi.waitUntil(() => connectionCount.value >= 2, { timeout: 2000 })
+    expect(connectionCount.value).toBeGreaterThanOrEqual(2)
+
+    conn.stop()
+    await new Promise((res) => wss.close(res))
+  })
+
+  it('reconnects when the connection dies silently (no close frame)', async () => {
+    // autoPong: false makes the server ignore the client's ws.ping() — simulating a
+    // half-open connection where the socket stays OPEN but no traffic arrives and no
+    // 'close' event ever fires. The heartbeat watchdog must terminate it and reconnect.
+    const wss = new WebSocketServer({ port: 0, autoPong: false })
+    const port = (wss.address() as AddressInfo).port
+    const connectionCount = { value: 0 }
+
+    wss.on('connection', (ws) => {
+      connectionCount.value++
+      ws.on('message', (raw) => {
+        const msg = JSON.parse(raw.toString())
+        if (msg.type === 'auth') {
+          ws.send(JSON.stringify({ type: 'auth_ok', agentId: 'agent-1', relayInstanceId: 'relay-1' }))
+          // Then go silent forever: no pings, no pongs, no close.
+        }
+      })
+    })
+
+    const conn = new Connection(
+      `ws://localhost:${port}`,
+      makeConfig({ heartbeatInterval: 40, reconnectDelay: 30 }),
+      noop,
+    )
+    conn.start()
+
+    await vi.waitUntil(() => connectionCount.value >= 2, { timeout: 3000 })
     expect(connectionCount.value).toBeGreaterThanOrEqual(2)
 
     conn.stop()

@@ -41,6 +41,12 @@ class _Defaults:
     max_concurrent_calls: int = 10
     reconnect_delay: float = 1.0
     max_reconnect_delay: float = 60.0
+    # WebSocket keepalive. The library pings every `heartbeat_interval` seconds and, if
+    # no pong arrives within `heartbeat_timeout`, closes the socket — which surfaces as a
+    # reconnect. This is what detects silently-dropped ("half-open") connections that
+    # never deliver a close frame. Set heartbeat_interval to 0 to disable keepalive.
+    heartbeat_interval: float = 30.0
+    heartbeat_timeout: float = 20.0
 
 
 DEFAULTS = _Defaults()
@@ -57,4 +63,6 @@ class ResolvedConfig:
     max_concurrent_calls: int
     reconnect_delay: float
     max_reconnect_delay: float
+    heartbeat_interval: float
+    heartbeat_timeout: float
     logger: Logger

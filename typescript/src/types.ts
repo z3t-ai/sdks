@@ -27,6 +27,12 @@ export interface AgentConfig {
   /** Maximum reconnect backoff in ms. Default: 60000 */
   maxReconnectDelay?: number
 
+  /** Heartbeat interval in ms. The SDK sends a WebSocket ping every interval and
+   *  terminates the socket (forcing a reconnect) if no traffic arrives before the
+   *  next one — this is what detects silently-dropped ("half-open") connections that
+   *  never emit a 'close' event. Set to 0 to disable. Default: 30000 */
+  heartbeatInterval?: number
+
   /** Custom logger. Default: console */
   logger?: Logger
 }
@@ -111,6 +117,7 @@ export interface ResolvedConfig {
   maxConcurrentCalls: number
   reconnectDelay: number
   maxReconnectDelay: number
+  heartbeatInterval: number
   logger: Logger
 }
 
@@ -120,4 +127,5 @@ export const DEFAULTS = {
   maxConcurrentCalls: 10,
   reconnectDelay: 1_000,
   maxReconnectDelay: 60_000,
+  heartbeatInterval: 30_000,
 } as const

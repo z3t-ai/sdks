@@ -26,6 +26,7 @@ export class Agent {
       maxConcurrentCalls: DEFAULTS.maxConcurrentCalls,
       reconnectDelay: DEFAULTS.reconnectDelay,
       maxReconnectDelay: DEFAULTS.maxReconnectDelay,
+      heartbeatInterval: DEFAULTS.heartbeatInterval,
       logger: console,
       relayUrls: [], // populated on start() via bootstrap or config override
       ...config,

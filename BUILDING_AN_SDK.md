@@ -43,7 +43,8 @@ A developer installs the package, writes one or more handler functions, and call
 `start()`. The SDK owns everything else:
 
 - WebSocket connection(s) to the relay, with auth and reconnect
-- Heartbeat (responding to relay pings)
+- Heartbeat: responding to relay `ping` frames **and** actively detecting a
+  silently-dropped ("half-open") connection so reconnect actually fires (see §5.1)
 - Routing incoming calls to the right handler by schema version
 - Concurrency limiting and queueing
 - Per-call timeout enforcement
@@ -67,7 +68,12 @@ in service of these:
 3. **Respond to `ping` with `pong` immediately**, without queuing behind in-flight
    handlers.
 4. **Reconnect with exponential backoff** on disconnect, capped at a max delay, and
-   re-send `auth` on every reconnect.
+   re-send `auth` on every reconnect. **A disconnect is not always signalled** — a
+   connection killed by a NAT/load-balancer idle timeout, a firewall, or a relay crash
+   can leave the socket "half-open": still reported as connected, but dead, with no
+   close event ever delivered. The SDK MUST run its own liveness watchdog to detect
+   this and force the close that drives reconnect (see §5.1). Without it, the agent
+   silently stops receiving calls and never recovers.
 5. **The platform — not the SDK — validates consumer input** against the published
    schema. The SDK passes the raw `input` JSON straight to the handler; it does not
    re-validate it client-side.
@@ -87,6 +93,7 @@ Every SDK should expose an equivalent of an `AgentConfig` struct:
 | `maxConcurrentCalls` | no       | `10`                     | Calls processed at once before queueing                              |
 | `reconnectDelay`     | no       | `1000` ms                | Initial reconnect backoff                                            |
 | `maxReconnectDelay`  | no       | `60000` ms               | Backoff ceiling                                                      |
+| `heartbeatInterval`  | no       | `30000` ms               | Liveness watchdog / keepalive-ping period; `0` disables it (see §5.1)|
 | `logger`             | no       | stdout/stderr equivalent | Needs `info`/`warn`/`error` methods                                  |
 
 Use a single host (`https://relay.z3t.ai/v1`) for every HTTP call your SDK makes —
@@ -163,6 +170,42 @@ CONNECT wss://{relayUrl}        — one per URL
 delay = min(reconnectDelay × 2^attempt, maxReconnectDelay)
 attempt += 1
 ```
+
+### 5.1 Liveness watchdog (detecting half-open connections)
+
+The `CLOSE / socket error` branch above is the *only* thing that triggers reconnect —
+so if a connection dies without ever delivering a close event, the agent sits there
+believing it is connected while the relay has long since dropped it. This is the
+common failure mode in production: NAT/firewall connection-table eviction, cloud
+load-balancer idle timeouts (AWS ALB defaults to 60s), and relay pods dying without a
+clean close all produce a **half-open** socket — `readyState` stays OPEN, no bytes
+flow, no close fires. Symptom: "agents disconnect after a while and never reconnect."
+
+Responding to relay `ping` frames (rule 3) is not sufficient — it only helps while the
+relay is still alive and reaching you. You need an SDK-side watchdog that detects the
+*absence* of traffic:
+
+```
+every heartbeatInterval:
+    if no frame of ANY kind has arrived since the last tick:
+        force-close / terminate the socket   ← this makes CLOSE fire → reconnect
+    else:
+        mark "not seen since"; send a keepalive ping
+mark "seen" on every inbound frame (data message, protocol pong, or relay `ping`)
+```
+
+Implementation notes:
+- Prefer the transport's **protocol-level** ping/pong (WebSocket control frames) for
+  the keepalive probe — it works even when no application traffic flows and doesn't
+  need relay cooperation. Treat *any* inbound frame as proof of life, not just pongs.
+- If your WebSocket library already has built-in keepalive (e.g. Python `websockets`'
+  `ping_interval` / `ping_timeout`), configure it from `heartbeatInterval` rather than
+  hand-rolling a watchdog — but make sure it is actually enabled and that its timeout
+  fires a reconnect. Don't leave it on library defaults silently.
+- `heartbeatInterval` must be **shorter than the shortest idle timeout on the path**
+  (LB/NAT/proxy). 30s is a safe default against a 60s LB timeout.
+- `heartbeatInterval: 0` disables the watchdog (tests, or when the transport guarantees
+  liveness some other way).
 
 ## 6. Call dispatch & concurrency
 
@@ -495,6 +538,11 @@ demand, and a way to force-close the connection to test reconnect. Then verify:
 - `ctx.progress()` mid-handler → `progress` frame observed before the terminal frame
 - Force-close the mock relay's connection → SDK reconnects → new `auth` sent →
   the call that was in flight is **not** redispatched
+- **Half-open connection**: mock relay stops responding to keepalive pings but never
+  sends a close frame → the liveness watchdog (§5.1) terminates the socket and the SDK
+  reconnects. (If the transport auto-ponds and a true half-open can't be simulated
+  in-process, assert instead that `heartbeatInterval` is threaded into the transport's
+  keepalive config, and that `0` disables it.)
 - `ctx.agents.call(...)` request body always has `capabilities: []`
 
 Target ~90% line coverage. No external services needed — the mock relay and a

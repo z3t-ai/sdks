@@ -34,6 +34,8 @@ class Agent:
         max_concurrent_calls: int | None = None,
         reconnect_delay: float | None = None,
         max_reconnect_delay: float | None = None,
+        heartbeat_interval: float | None = None,
+        heartbeat_timeout: float | None = None,
         logger: Logger | None = None,
     ) -> None:
         from .types import ConsoleLogger
@@ -48,6 +50,8 @@ class Agent:
             max_concurrent_calls=max_concurrent_calls if max_concurrent_calls is not None else DEFAULTS.max_concurrent_calls,
             reconnect_delay=reconnect_delay if reconnect_delay is not None else DEFAULTS.reconnect_delay,
             max_reconnect_delay=max_reconnect_delay if max_reconnect_delay is not None else DEFAULTS.max_reconnect_delay,
+            heartbeat_interval=heartbeat_interval if heartbeat_interval is not None else DEFAULTS.heartbeat_interval,
+            heartbeat_timeout=heartbeat_timeout if heartbeat_timeout is not None else DEFAULTS.heartbeat_timeout,
             logger=logger or ConsoleLogger(),
         )
         self._handlers: dict[int | str, Handler] = {}

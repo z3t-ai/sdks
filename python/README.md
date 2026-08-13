@@ -290,6 +290,8 @@ Agent(
     max_concurrent_calls: int | None = None,     # default 10
     reconnect_delay: float | None = None,        # seconds, default 1.0
     max_reconnect_delay: float | None = None,    # seconds, default 60.0
+    heartbeat_interval: float | None = None,     # seconds, default 30.0 — keepalive ping period; 0 disables
+    heartbeat_timeout: float | None = None,      # seconds, default 20.0 — reconnect if no pong within this
     logger: Logger | None = None,                # default: ConsoleLogger() — needs info/warn/error
 )
 ```

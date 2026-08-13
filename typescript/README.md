@@ -363,6 +363,7 @@ const agent = new Agent({
   maxConcurrentCalls: 10,                           // default
   reconnectDelay:     1_000,                        // initial backoff in ms (default: 1s)
   maxReconnectDelay:  60_000,                       // max backoff in ms (default: 60s)
+  heartbeatInterval:  30_000,                       // keepalive/liveness watchdog in ms (default: 30s; 0 disables)
   logger:             console,                      // custom logger
 
   // Override relay URLs — only needed for local development / testing.
