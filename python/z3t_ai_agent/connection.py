@@ -35,9 +35,21 @@ class Connection:
     async def run(self) -> None:
         """Connect, authenticate, and process messages until `stop()` is called.
         Reconnects with exponential backoff on every disconnect in between."""
+        # websockets runs keepalive in a background task: it pings every `ping_interval`
+        # seconds and raises ConnectionClosed if no pong arrives within `ping_timeout`.
+        # This is what detects silently-dropped ("half-open") connections that never
+        # deliver a close frame — without it the `async for` below would block forever on
+        # a dead socket and never reconnect. `heartbeat_interval <= 0` disables keepalive.
+        ping_interval = self._config.heartbeat_interval if self._config.heartbeat_interval > 0 else None
+        ping_timeout = self._config.heartbeat_timeout if self._config.heartbeat_interval > 0 else None
+
         while not self._stopped:
             try:
-                async with websockets.connect(self._url) as ws:
+                async with websockets.connect(
+                    self._url,
+                    ping_interval=ping_interval,
+                    ping_timeout=ping_timeout,
+                ) as ws:
                     self._ws = ws
                     self._reconnect_attempt = 0
                     await self._send_raw(ws, self._auth_message())

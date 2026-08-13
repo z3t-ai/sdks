@@ -15,6 +15,8 @@ def make_config(**overrides) -> ResolvedConfig:
         max_concurrent_calls=10,
         reconnect_delay=1.0,
         max_reconnect_delay=60.0,
+        heartbeat_interval=30.0,
+        heartbeat_timeout=20.0,
         logger=ConsoleLogger(),
     )
     defaults.update(overrides)

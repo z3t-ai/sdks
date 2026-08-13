@@ -76,6 +76,15 @@ Both suites are self-contained — they spin up an in-process mock relay and moc
 → { type: 'pong' }
 ```
 
+**Liveness / half-open detection** is separate from the app-level `ping`/`pong` above.
+Both SDKs run a keepalive watchdog (`heartbeatInterval`, default 30s / `heartbeat_interval`
+30s) using **protocol-level** WebSocket ping/pong: if no frame of any kind arrives within
+the interval, the socket is terminated so the reconnect path fires. Without it, a socket
+dropped by a NAT/LB idle timeout or a relay crash stays half-open (OPEN but dead, no close
+event) and the agent never reconnects. TS hand-rolls the watchdog in `connection.ts`;
+Python configures the `websockets` library's built-in `ping_interval`/`ping_timeout`. See
+[`BUILDING_AN_SDK.md §5.1`](BUILDING_AN_SDK.md).
+
 Full spec (every HTTP endpoint, every default, every behavioral rule): [`BUILDING_AN_SDK.md`](BUILDING_AN_SDK.md).
 
 ---

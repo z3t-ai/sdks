@@ -16,6 +16,8 @@ def make_config(**overrides) -> ResolvedConfig:
         max_concurrent_calls=10,
         reconnect_delay=0.01,
         max_reconnect_delay=0.2,
+        heartbeat_interval=0.0,  # disabled by default in tests; opt in per-test
+        heartbeat_timeout=20.0,
         logger=ConsoleLogger(),
     )
     defaults.update(overrides)
@@ -166,3 +168,58 @@ async def test_send_raw_swallows_connection_closed():
 
     # should not raise
     await _Connection._send_raw(FakeClosedWs(), {"type": "pong"})
+
+
+async def test_keepalive_params_forwarded_to_websockets(monkeypatch):
+    # The actual "terminate a dead half-open socket and reconnect" behaviour lives inside
+    # the websockets library's keepalive task (a ping every ping_interval, close after
+    # ping_timeout with no pong). We can't simulate a true half-open in-process — the mock
+    # server auto-ponds — so we assert the config is wired into websockets.connect(); the
+    # library is responsible for the rest.
+    import z3t_ai_agent.connection as conn_mod
+
+    captured: dict = {}
+
+    def fake_connect(url, **kwargs):
+        captured["url"] = url
+        captured.update(kwargs)
+        raise RuntimeError("halt")  # break out of run()'s connect loop
+
+    monkeypatch.setattr(conn_mod.websockets, "connect", fake_connect)
+
+    conn = Connection(
+        "ws://localhost:1",
+        make_config(heartbeat_interval=15.0, heartbeat_timeout=7.0),
+        lambda *a: None,
+        [],
+    )
+    with pytest.raises(RuntimeError, match="halt"):
+        await conn.run()
+
+    assert captured["ping_interval"] == 15.0
+    assert captured["ping_timeout"] == 7.0
+
+
+async def test_keepalive_disabled_when_interval_zero(monkeypatch):
+    import z3t_ai_agent.connection as conn_mod
+
+    captured: dict = {}
+
+    def fake_connect(url, **kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("halt")
+
+    monkeypatch.setattr(conn_mod.websockets, "connect", fake_connect)
+
+    conn = Connection(
+        "ws://localhost:1",
+        make_config(heartbeat_interval=0.0),
+        lambda *a: None,
+        [],
+    )
+    with pytest.raises(RuntimeError, match="halt"):
+        await conn.run()
+
+    # interval 0 → keepalive fully disabled
+    assert captured["ping_interval"] is None
+    assert captured["ping_timeout"] is None
