@@ -1,16 +1,27 @@
 import WebSocket from 'ws'
-import type { ResolvedConfig, WsSend } from './types'
+import type { ResolvedConfig } from './types'
 
-/** Called by the Connection whenever the relay dispatches a call to this agent */
-export type CallDispatcher = (
-  callId: string,
-  schemaVersion: number,
-  input: unknown,
-  send: WsSend,
-) => void
+/** Called by the Connection whenever the relay dispatches a call to this agent.
+ *
+ *  Deliberately carries no send channel. Binding a call's replies to the socket it arrived on is
+ *  what made a long run unrecoverable: the socket dies mid-call, the closure keeps pointing at it,
+ *  and every later frame — including the result the user is waiting for — is dropped in silence.
+ *  Delivery is the Agent's job, across whichever connection is alive when there is something to
+ *  say. See Agent.deliver. */
+export type CallDispatcher = (callId: string, schemaVersion: number, input: unknown) => void
+
+/** Connection lifecycle signals the Agent needs in order to route and confirm delivery. */
+export interface ConnectionHooks {
+  /** The relay has accepted our auth — this connection can now carry call traffic. */
+  onReady?(): void
+  /** The relay has durably recorded a terminal frame for this call. */
+  onAck?(callId: string): void
+}
 
 export class Connection {
   private ws: WebSocket | null = null
+  /** Frames sent before the relay answers our auth are rejected, so "open" is not enough. */
+  private authenticated = false
   private reconnectAttempt = 0
   private reconnectTimer: NodeJS.Timeout | null = null
   private heartbeatTimer: NodeJS.Timeout | null = null
@@ -25,8 +36,27 @@ export class Connection {
     private readonly dispatch: CallDispatcher,
     /** Schema versions this agent instance handles — sent in the auth message so the relay
      *  can route calls to instances that support the requested version. */
-    private readonly supportedVersions: number[],
+    private readonly supportedVersions: number[] = [],
+    private readonly hooks: ConnectionHooks = {},
   ) {}
+
+  /** True when this connection can carry a frame right now. */
+  isOpen(): boolean {
+    return this.authenticated && this.ws?.readyState === WebSocket.OPEN
+  }
+
+  /** Attempts to send on the CURRENT socket. Returns false if this connection cannot carry it,
+   *  so the caller can try another connection or queue the frame. */
+  send(payload: unknown): boolean {
+    if (!this.isOpen()) return false
+    try {
+      this.ws!.send(JSON.stringify(payload))
+      return true
+    } catch (err) {
+      this.config.logger.warn(`[z3t SDK] Send failed on ${this.url}:`, (err as Error).message)
+      return false
+    }
+  }
 
   start(): void {
     this.connect()
@@ -45,6 +75,7 @@ export class Connection {
   private connect(): void {
     const ws = new WebSocket(this.url)
     this.ws = ws
+    this.authenticated = false
 
     ws.on('open', () => {
       this.reconnectAttempt = 0
@@ -77,6 +108,7 @@ export class Connection {
     })
 
     ws.on('close', () => {
+      this.authenticated = false
       this.stopHeartbeat()
       if (!this.stopped) this.scheduleReconnect()
     })
@@ -123,27 +155,25 @@ export class Connection {
   private handleMessage(ws: WebSocket, msg: Record<string, unknown>): void {
     switch (msg.type) {
       case 'auth_ok':
+        this.authenticated = true
         this.config.logger.info(
           `[z3t SDK] Authenticated on ${this.url} — agentId: ${msg.agentId}`,
         )
+        // Anything queued while every connection was down can go out now.
+        this.hooks.onReady?.()
         break
 
       case 'ping':
         ws.send(JSON.stringify({ type: 'pong' }))
         break
 
-      case 'call': {
-        const send: WsSend = (payload) => {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify(payload))
-          }
-        }
-        this.dispatch(msg.callId as string, msg.schemaVersion as number, msg.input, send)
+      case 'call':
+        this.dispatch(msg.callId as string, msg.schemaVersion as number, msg.input)
         break
-      }
 
       case 'ack':
-        // No-op — relay acknowledges result/error receipt
+        // The relay has recorded the terminal frame — the Agent can stop retrying it.
+        this.hooks.onAck?.(msg.callId as string)
         break
 
       case 'error':
