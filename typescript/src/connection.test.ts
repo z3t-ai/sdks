@@ -41,7 +41,7 @@ describe('Connection — auth', () => {
     conn.start()
 
     await vi.waitUntil(() => received.length > 0, { timeout: 1000 })
-    expect(received[0]).toEqual({ type: 'auth', apiKey: 'test-key' })
+    expect(received[0]).toEqual({ type: 'auth', apiKey: 'test-key', supportedVersions: [] })
 
     conn.stop()
     await new Promise((res) => wss.close(res))
