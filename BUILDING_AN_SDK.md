@@ -58,10 +58,15 @@ A developer installs the package, writes one or more handler functions, and call
 These rules apply regardless of language. Everything else in this document is detail
 in service of these:
 
-1. **Exactly one terminal frame per `callId`.** Every dispatched call ends with
-   exactly one `result` or `error` frame sent back over the WebSocket — never zero,
-   never two. `progress` frames may be sent zero or more times before the terminal
-   frame.
+1. **Exactly one terminal frame per `callId`, delivered — not merely sent.** Every
+   dispatched call ends with a `result` or `error` frame, and the SDK must keep trying
+   until the relay `ack`s it (see §5.2). Writing it once to a socket is not enough: a
+   socket accepts bytes right up until it doesn't, and a result lost this way leaves the
+   call running until the platform reaps it — the user is told their run timed out on
+   work that actually completed. The relay's handlers are keyed by `callId` and guarded
+   on the call still being live, so a duplicate is a no-op; that is what makes retrying
+   safe. `progress`/`subprogress` frames may be sent zero or more times before the terminal frame and
+   are best-effort — never retried.
 2. **Never block the WebSocket read loop on a handler.** Each call must run as an
    independent concurrent unit (goroutine, task, green thread, etc.) so other calls —
    and `ping` frames — keep being processed while a handler is running.
@@ -73,7 +78,10 @@ in service of these:
    can leave the socket "half-open": still reported as connected, but dead, with no
    close event ever delivered. The SDK MUST run its own liveness watchdog to detect
    this and force the close that drives reconnect (see §5.1). Without it, the agent
-   silently stops receiving calls and never recovers.
+   silently stops receiving calls and never recovers. **A reconnect must not orphan an
+   in-flight call**: frames are addressed by `callId`, not by socket, so a call that
+   arrived on a socket which has since died is still answerable on any other
+   authenticated connection (see §5.2).
 5. **The platform — not the SDK — validates consumer input** against the published
    schema. The SDK passes the raw `input` JSON straight to the handler; it does not
    re-validate it client-side.
@@ -144,12 +152,18 @@ CONNECT wss://{relayUrl}        — one per URL
 
 → { type: 'result', callId, output }      — handler resolved
 → { type: 'error',  callId, message }     — handler threw / timed out / no handler
+→ { type: 'subprogress', callId, message, progress? }      — fire-and-forget detail
+        about the step already running; REPLACES the previous one instead of adding
+        a row, carries no `step` (it binds to the newest progress event), and is
+        never persisted. Same omit-if-absent rule for `progress`.
 → { type: 'progress', callId, step, message, progress? }   — fire-and-forget,
         zero or more times before the terminal frame; omit `progress` key if
         the caller didn't pass a value (don't send null)
 
-← { type: 'ack' }
-    no-op — relay acknowledging receipt of your result/error frame
+← { type: 'ack', callId }
+    the relay has durably recorded your terminal frame for this call.
+    Stop retrying it (see §5.2). This is the ONLY confirmation that the
+    result arrived — a successful socket write is not one.
 
 ← { type: 'error', message, callId? }
     relay-level error, not tied to a specific call you dispatched.
@@ -159,9 +173,10 @@ CONNECT wss://{relayUrl}        — one per URL
 
 ← CLOSE / socket error
     schedule reconnect (see backoff below); send `auth` again on reconnect.
-    In-flight calls on the dropped connection are NOT re-dispatched — the
-    platform handles timing them out and refunding tokens. Do not try to
-    replay them yourself.
+    In-flight calls on the dropped connection are NOT re-dispatched by the
+    relay, and you must not ask it to replay them. But the handler you are
+    already running keeps running, and its result is still wanted: send it
+    on whichever connection is alive when it is ready (see §5.2).
 ```
 
 **Reconnect backoff** (reset the attempt counter to 0 on every successful `open`):
@@ -206,6 +221,38 @@ Implementation notes:
   (LB/NAT/proxy). 30s is a safe default against a 60s LB timeout.
 - `heartbeatInterval: 0` disables the watchdog (tests, or when the transport guarantees
   liveness some other way).
+
+### 5.2 Delivering results across a reconnect
+
+The naive implementation binds a call's replies to the socket that delivered it — a closure
+capturing the connection, used for `progress` and the terminal frame alike. It is wrong, and it
+fails exactly where it hurts most: on the long-running calls the platform exists to serve.
+
+A ten-minute call outlives its socket routinely — a NAT idle timeout, a load-balancer recycle, a
+relay deploy, a watchdog false positive. When that happens, the captured socket is closed, the
+handler finishes normally a few minutes later, and the result is written into a dead connection.
+Nothing throws. The relay never learns the call finished, so it sits in `processing` until the
+platform's timeout reaps it and refunds the buyer — for work that completed, cost real tokens, and
+was simply never delivered.
+
+Three rules avoid it:
+
+1. **Delivery belongs to the agent, not the connection.** Resolve a live connection at send time
+   and use it. Never capture a socket in a per-call closure. Any authenticated connection can carry
+   any call's frames, including one to a different relay instance than the call arrived on.
+2. **Hold terminal frames until acknowledged.** Keep unacked `result`/`error` frames in a map keyed
+   by `callId`. Re-send on an interval (~5s), and immediately after any connection authenticates —
+   a reconnect is the most likely reason delivery failed. Clear the entry on `ack`. Give up only
+   after a bound comfortably longer than the platform's call timeout (~10 minutes), and log loudly
+   when you do.
+3. **Do not queue telemetry indefinitely.** `progress` and `subprogress` are best-effort. Hold a small bounded buffer
+   while nothing is live and drop the oldest past the cap: progress that arrives after the fact is
+   worth little, and flooding the relay with a stale backlog after a long outage is worth less.
+
+Sending before the relay answers `auth_ok` is also a silent loss — the relay rejects unauthenticated
+frames. "Can this connection carry a frame?" means *authenticated*, not merely *socket open*.
+
+---
 
 ## 6. Call dispatch & concurrency
 
@@ -261,7 +308,8 @@ Extract the id with something equivalent to `^z3t://[^/]+/(.+)$`; raise on misma
 
 | Method                                          | Calls                                                                                                                               | Notes                                                                                                      |
 | ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `progress(step, message, progress?)`            | WS `{ type: 'progress', callId, step, message, progress? }`                                                                         | Fire-and-forget — don't make the handler await a relay ack                                                 |
+| `progress(step, message, progress?)`            | WS `{ type: 'progress', callId, step, message, progress? }`                                                                         | Fire-and-forget — don't make the handler await a relay ack. One row per call in the caller's UI            |
+| `subprogress(message, progress?)`               | WS `{ type: 'subprogress', callId, message, progress? }`                                                                            | Detail within the current step. Replaces the previous sub-line, never adds a row; deliberately no `step`   |
 | `files.download(uri)`                           | `GET /files/{id}/agent-url` → `{ signedUrl, filename, mimeType }`, then `GET signedUrl` directly (storage host, **no auth header**) | Returns `{ buffer, filename, mimeType }` — not a raw buffer                                                |
 | `files.upload(data, filename, mimeType)`        | 3 steps — see below                                                                                                                 | Returns the new `z3t://files/{id}` URI as a string                                                         |
 | `taxonomies.entries(uri)`                       | `GET /taxonomies/{id}/entries` → `{ entries: [...] }`                                                                               | Returns the array directly                                                                                 |
@@ -536,6 +584,7 @@ demand, and a way to force-close the connection to test reconnect. Then verify:
 - Handler throws → `error` frame observed
 - Handler exceeds `timeout` → `error` frame with `'Handler timeout'` observed
 - `ctx.progress()` mid-handler → `progress` frame observed before the terminal frame
+- `ctx.subprogress()` mid-handler → `subprogress` frame with **no `step` key**, and no `progress` key when the fraction is omitted
 - Force-close the mock relay's connection → SDK reconnects → new `auth` sent →
   the call that was in flight is **not** redispatched
 - **Half-open connection**: mock relay stops responding to keepalive pings but never

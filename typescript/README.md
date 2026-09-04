@@ -271,6 +271,28 @@ agent.handle(1, { input, output }, async (input, ctx) => {
 - `message` — human-readable fallback if no i18n key is found
 - `progress` — optional 0–1 value; omit for indeterminate steps
 
+**Each `progress` call adds a row** to the caller's activity log, so emit one per stage — not one
+per loop iteration.
+
+### Reporting detail inside a step
+
+A stage that reports once and then runs for four minutes reads as a hang. `ctx.subprogress` is for
+everything in between: it rewrites a single live line underneath the current row instead of adding
+one, so a slow stage can report as often as it likes.
+
+```typescript
+await ctx.progress('extracting', 'Reading the contract…', 0.2)
+
+for (const [i, page] of pages.entries()) {
+  await ctx.subprogress(`page ${i + 1} of ${pages.length}`, 0.2 + 0.2 * (i / pages.length))
+  ...
+}
+```
+
+- No `step` — a sub-line belongs to whichever `progress` step is newest.
+- Only the newest one is kept, and the next `progress` call clears it.
+- Not persisted: it is what the run is doing *right now*, not part of the call's history.
+
 ---
 
 ## Context API (`ctx`)
