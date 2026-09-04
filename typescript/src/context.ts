@@ -54,6 +54,15 @@ export function createCallContext(
       })
     },
 
+    async subprogress(message, progress) {
+      send({
+        type: 'subprogress',
+        callId,
+        message,
+        ...(progress !== undefined ? { progress } : {}),
+      })
+    },
+
     files: {
       async download(uri) {
         const id = extractId(uri)

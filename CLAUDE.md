@@ -72,9 +72,30 @@ Both suites are self-contained — they spin up an in-process mock relay and moc
 → { type: 'result', callId, output }
 → { type: 'error', callId, message }
 → { type: 'progress', callId, step, message, progress? }
+→ { type: 'subprogress', callId, message, progress? }
 ← { type: 'ping' }
 → { type: 'pong' }
+← { type: 'ack', callId }
 ```
+
+**Delivery is at-least-once, and `ack` is what closes the loop.** Both SDKs route frames through
+the `Agent` (`_deliver` / `deliver`), which picks a live connection at send time rather than
+capturing the socket a call arrived on — a ten-minute call routinely outlives its socket, and a
+result written to a dead one is lost in silence, leaving the platform to reap a call whose work
+actually finished. Terminal frames are held in a pending map and re-sent every 5s, and immediately
+on any `auth_ok`, until the relay acks; the SDK gives up after 10 minutes and logs. The relay's
+handlers are guarded on the call still being live, so duplicates are no-ops. `progress` and
+`subprogress` are best-effort: bounded queue (50 frames), dropped past the cap, never retried.
+
+**`progress` vs `subprogress` (added in 0.2.0).** `progress` is a milestone — the platform persists
+it and the caller's UI adds a row per event. `subprogress` is detail about the step already running:
+it carries **no `step`** (it belongs to whichever milestone is newest, and the single ordered event
+channel is what establishes that), is never persisted, and each one REPLACES the previous live line
+rather than adding a row. It exists so a stage that runs for ten minutes — retrying OCR strategies
+on a scanned document, walking 40 pages — can report continuously without flooding the log. The
+relay caches only the newest one (Redis, 35min TTL) so a page reload still sees it, and drops it on
+the next `progress` or on any terminal frame. See
+[`BUILDING_AN_SDK.md §5.2`](BUILDING_AN_SDK.md).
 
 **Liveness / half-open detection** is separate from the app-level `ping`/`pong` above.
 Both SDKs run a keepalive watchdog (`heartbeatInterval`, default 30s / `heartbeat_interval`

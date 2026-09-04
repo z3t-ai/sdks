@@ -53,8 +53,19 @@ export interface CallContext {
   callId: string
   schemaVersion: number
 
-  /** Report a progress step to the platform. Fire-and-forget — do not await if not needed. */
+  /** Report a progress milestone. Each call adds a new line to the caller's activity log, so
+   *  emit one per stage — not once per loop iteration. Fire-and-forget: do not await if not
+   *  needed. `progress` is the overall 0–1 position, if the agent can estimate one. */
   progress(step: string, message: string, progress?: number): Promise<void>
+
+  /** Report intermediate detail *within* the current step. Each call REPLACES the previous
+   *  subprogress line rather than adding a row, so a long stage can report as often as it likes —
+   *  "page 7 of 12", "OCR strategy 2 of 3", an elapsed counter — without turning a ten-minute run
+   *  into sixty rows. This is what tells the user a slow stage is still working.
+   *
+   *  Only the newest line is kept (cached by the relay so a page reload still sees it); nothing is
+   *  persisted to the call's durable event history. A subsequent `progress()` clears it. */
+  subprogress(message: string, progress?: number): Promise<void>
 
   files: {
     /** Download a z3t://files/{id} URI → buffer + original filename */

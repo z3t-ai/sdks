@@ -93,3 +93,56 @@ describe('ctx.progress()', () => {
     expect(frame).toMatchObject({ type: 'progress', callId: 'call-ind', step: 'step', message: 'indeterminate step' })
   })
 })
+
+describe('ctx.subprogress()', () => {
+  let relay: MockRelay
+  let agent: Agent
+
+  afterEach(async () => {
+    agent?.stop()
+    await relay?.close()
+  })
+
+  it('sends a subprogress frame carrying no step — it belongs to the newest milestone', async () => {
+    relay = createMockRelay()
+    agent = new Agent({
+      apiKey: 'test-key',
+      relayUrls: [`ws://localhost:${relay.port}`],
+      logger: silentLogger,
+      timeout: 2_000,
+    })
+
+    agent.handle(async (_input, ctx) => {
+      await ctx.progress('extracting_text', 'Reading the contract…', 0.2)
+      await ctx.subprogress('page 7 of 12', 0.25)
+      await ctx.subprogress('page 8 of 12')
+      return { done: true }
+    })
+    agent.start()
+
+    await vi.waitUntil(
+      () => relay.received.some((m: unknown) => (m as Record<string, string>).type === 'auth'),
+      { timeout: 1000 },
+    )
+
+    relay.dispatch('call-sub', {})
+
+    await vi.waitUntil(
+      () => relay.received.filter((m: unknown) => (m as Record<string, string>).type === 'subprogress').length >= 2,
+      { timeout: 2000 },
+    )
+
+    const frames = relay.received.filter(
+      (m: unknown) => (m as Record<string, string>).type === 'subprogress',
+    ) as Array<Record<string, unknown>>
+
+    expect(frames[0]).toEqual({
+      type: 'subprogress',
+      callId: 'call-sub',
+      message: 'page 7 of 12',
+      progress: 0.25,
+    })
+    // Omitted rather than sent as null, matching how `progress` treats an absent fraction.
+    expect(frames[1]).toEqual({ type: 'subprogress', callId: 'call-sub', message: 'page 8 of 12' })
+  })
+})
