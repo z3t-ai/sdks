@@ -1,13 +1,17 @@
 import { Connection, type CallDispatcher } from './connection'
 import { createCallContext } from './context'
+import { CallJournal, SuspendSignal } from './journal'
 import { createLlmClients } from './llm'
-import { DEFAULTS, type AgentConfig, type Handler, type ResolvedConfig, type WsSend } from './types'
+import { DEFAULTS, type AgentConfig, type Handler, type IncomingCall, type ResolvedConfig, type WsSend } from './types'
 import type { VersionSchema } from './schema'
 
-interface QueuedCall {
-  callId: string
-  schemaVersion: number
-  input: unknown
+type QueuedCall = IncomingCall
+
+/** Key of a turn-terminal frame in the pending map. A suspended call comes back as a new turn of
+ *  the same callId, so the key must tell turns apart — or the ack of turn 0's suspend could settle
+ *  turn 1's result. Turn 0 keeps the bare callId. */
+function pendingKey(callId: string, turn: number): string {
+  return turn === 0 ? callId : `${callId}#${turn}`
 }
 
 /** How often an unacknowledged terminal frame is re-sent. */
@@ -33,10 +37,11 @@ export class Agent {
   /** Frames that could not go out because no connection was live, flushed on the next auth_ok. */
   private readonly outbox: unknown[] = []
 
-  /** Terminal frames awaiting the relay's ack, keyed by callId. A result that is not acknowledged
+  /** Turn-terminal frames (result, error, suspend) awaiting the relay's ack, keyed by callId and
+   *  turn (see pendingKey). A result that is not acknowledged
    *  has not been recorded, whatever the socket reported — this is the only thing standing between
    *  a completed ten-minute run and a call that times out with the work already done. */
-  private readonly pending = new Map<string, { payload: unknown; since: number; timer: NodeJS.Timeout }>()
+  private readonly pending = new Map<string, { callId: string; payload: unknown; since: number; timer: NodeJS.Timeout }>()
 
   constructor(config: AgentConfig) {
     this.config = {
@@ -154,34 +159,47 @@ export class Agent {
   }
 
   /** At-least-once: retried until the relay acks it. The relay's handlers are keyed by callId and
-   *  guarded on the call still being live, so a duplicate is a no-op — which is what makes retry
-   *  safe here. */
-  private deliverTerminal(callId: string, payload: unknown): void {
+   *  turn, and guarded on the call still being live, so a duplicate is a no-op — which is what
+   *  makes retry safe here. */
+  private deliverTerminal(callId: string, turn: number, payload: unknown): void {
     this.deliver(payload)
+    const key = pendingKey(callId, turn)
 
     const timer = setInterval(() => {
-      const entry = this.pending.get(callId)
+      const entry = this.pending.get(key)
       if (!entry) return
       if (Date.now() - entry.since > RESULT_RETRY_TIMEOUT_MS) {
         this.config.logger.error(
           `[z3t SDK] Gave up delivering the result for call ${callId} after ` +
             `${Math.round(RESULT_RETRY_TIMEOUT_MS / 60_000)} minutes without an acknowledgement`,
         )
-        this.settle(callId)
+        this.settleKey(key)
         return
       }
       this.deliver(entry.payload)
     }, RESULT_RETRY_MS)
     timer.unref?.()
 
-    this.pending.set(callId, { payload, since: Date.now(), timer })
+    this.pending.set(key, { callId, payload, since: Date.now(), timer })
   }
 
-  private settle(callId: string): void {
-    const entry = this.pending.get(callId)
+  /** The relay acked a turn-terminal frame. An ack without a turn comes from a relay that predates
+   *  interactive calls — no call there has more than one turn, so every entry for the call goes. */
+  private settle(callId: string, turn?: number): void {
+    if (typeof turn === 'number') {
+      this.settleKey(pendingKey(callId, turn))
+      return
+    }
+    for (const [key, entry] of this.pending) {
+      if (entry.callId === callId) this.settleKey(key)
+    }
+  }
+
+  private settleKey(key: string): void {
+    const entry = this.pending.get(key)
     if (!entry) return
     clearInterval(entry.timer)
-    this.pending.delete(callId)
+    this.pending.delete(key)
   }
 
   /** A connection just authenticated — drain anything that had nowhere to go, and re-send every
@@ -221,6 +239,7 @@ export class Agent {
       status: schema.status ?? 'draft',
       ...(schema.deprecates?.length ? { deprecates: schema.deprecates } : {}),
       ...(schema.deprecationNotice ? { deprecationNotice: schema.deprecationNotice } : {}),
+      ...(schema.interactive !== undefined ? { interactive: schema.interactive } : {}),
     }))
 
     const res = await fetch(`${this.config.baseUrl}/schema-sync`, {
@@ -260,14 +279,14 @@ export class Agent {
       (v): v is number => typeof v === 'number',
     )
 
-    const dispatch: CallDispatcher = (callId, schemaVersion, input) => {
-      this.enqueue({ callId, schemaVersion, input })
+    const dispatch: CallDispatcher = (call) => {
+      this.enqueue(call)
     }
 
     for (const url of relayUrls) {
       const conn = new Connection(url, this.config, dispatch, supportedVersions, {
         onReady: () => this.onConnectionReady(),
-        onAck: (callId) => this.settle(callId),
+        onAck: (callId, turn) => this.settle(callId, turn),
       })
       this.connections.push(conn)
       conn.start()
@@ -288,8 +307,9 @@ export class Agent {
       this.config.logger.warn(
         `[z3t SDK] Queue depth exceeded (max ${maxQueue}) — rejecting call ${oldest.callId}`,
       )
-      this.deliverTerminal(oldest.callId, {
-        type: 'error', callId: oldest.callId, message: 'Queue depth exceeded',
+      const turn = oldest.turn ?? 0
+      this.deliverTerminal(oldest.callId, turn, {
+        type: 'error', callId: oldest.callId, turn, message: 'Queue depth exceeded',
       })
     }
   }
@@ -302,13 +322,15 @@ export class Agent {
 
   private processCall(call: QueuedCall): void {
     this.activeCount++
+    const turn = call.turn ?? 0
 
     const handler = this.handlers.get(call.schemaVersion) ?? this.handlers.get('default')
     if (!handler) {
       this.activeCount--
-      this.deliverTerminal(call.callId, {
+      this.deliverTerminal(call.callId, turn, {
         type: 'error',
         callId: call.callId,
+        turn,
         message: `No handler for schema version ${call.schemaVersion}`,
       })
       this.dequeue()
@@ -316,23 +338,68 @@ export class Agent {
     }
 
     const send: WsSend = (payload) => this.deliverBestEffort(payload)
-    const ctx = createCallContext(call.callId, call.schemaVersion, send, this.config, createLlmClients(this.config, call.callId))
+    const journal = new CallJournal(call.resume)
+    const ctx = createCallContext(
+      call.callId,
+      call.schemaVersion,
+      send,
+      this.config,
+      createLlmClients(this.config, call.callId),
+      { journal, canAsk: call.canAsk === true, turn },
+    )
 
-    const handlerPromise = handler(call.input as Record<string, unknown>, ctx)
+    // Kept as a thunk so a handler that throws synchronously is reported like any other failure.
+    const handlerPromise = Promise.resolve().then(() => handler(call.input as Record<string, unknown>, ctx))
+    // Per turn: a resumed call gets a fresh timeout, not what was left of the first one.
+    let timeoutTimer: NodeJS.Timeout | undefined
     const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error('Handler timeout')), this.config.timeout)
+      timeoutTimer = setTimeout(() => reject(new Error('Handler timeout')), this.config.timeout)
     })
 
     Promise.race([handlerPromise, timeoutPromise])
-      .then((output) => {
-        this.deliverTerminal(call.callId, { type: 'result', callId: call.callId, output })
-      })
-      .catch((err: Error) => {
-        this.deliverTerminal(call.callId, { type: 'error', callId: call.callId, message: err.message })
-      })
+      .then(
+        (output) => this.finishTurn(call.callId, turn, journal, { output }),
+        (err: Error) => this.finishTurn(call.callId, turn, journal, { err }),
+      )
       .finally(() => {
+        // Otherwise every finished call keeps a timer alive for the full timeout.
+        clearTimeout(timeoutTimer)
         this.activeCount--
         this.dequeue()
       })
+  }
+
+  /** Ends a turn with exactly one turn-terminal frame. A question recorded in the journal wins over
+   *  whatever the handler did afterwards: `ctx.ask` unwinds the handler by throwing, and a handler
+   *  that catches that and returns (or throws something else) must not turn a pause into a result. */
+  private finishTurn(
+    callId: string,
+    turn: number,
+    journal: CallJournal,
+    outcome: { output?: unknown; err?: Error },
+  ): void {
+    if (journal.pending) {
+      if (!(outcome.err instanceof SuspendSignal)) {
+        this.config.logger.warn(
+          `[z3t SDK] Call ${callId}: the handler caught the suspend signal from ctx.ask("${journal.pending.key}") ` +
+            `and carried on. The run is suspended regardless — let the error propagate.`,
+        )
+      }
+      let checkpoint: unknown
+      try {
+        checkpoint = journal.checkpoint()
+      } catch (err) {
+        this.deliverTerminal(callId, turn, { type: 'error', callId, turn, message: (err as Error).message })
+        return
+      }
+      this.deliverTerminal(callId, turn, { type: 'suspend', callId, turn, request: journal.pending, checkpoint })
+      return
+    }
+
+    if (outcome.err) {
+      this.deliverTerminal(callId, turn, { type: 'error', callId, turn, message: outcome.err.message })
+      return
+    }
+    this.deliverTerminal(callId, turn, { type: 'result', callId, turn, output: outcome.output })
   }
 }

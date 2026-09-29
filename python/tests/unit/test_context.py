@@ -238,3 +238,53 @@ async def test_agents_call_always_sends_empty_capabilities(respx_mock):
     parsed = json.loads(body)
     assert parsed["capabilities"] == []
     assert parsed["timeoutMs"] == 25000
+
+
+async def test_subprogress_sends_a_frame_with_no_step():
+    sent = []
+
+    async def send(payload):
+        sent.append(payload)
+
+    async with httpx.AsyncClient() as http:
+        ctx = create_call_context("call-1", 1, send, make_config(), LlmClients(openai=None, anthropic=None, google=None), http)
+        await ctx.subprogress("page 7 of 12", 0.4)
+        await ctx.subprogress("page 8 of 12")
+
+    assert sent == [
+        {"type": "subprogress", "callId": "call-1", "message": "page 7 of 12", "progress": 0.4},
+        {"type": "subprogress", "callId": "call-1", "message": "page 8 of 12"},
+    ]
+
+
+async def test_progress_is_silent_while_a_resumed_turn_replays():
+    from z3t_ai_agent.journal import CallJournal
+
+    sent = []
+
+    async def send(payload):
+        sent.append(payload)
+
+    journal = CallJournal({"checkpoint": {"v": 1, "steps": {"a": {"value": 1}}, "answers": {}}, "response": {"key": "q", "action": "declined"}})
+    async with httpx.AsyncClient() as http:
+        ctx = create_call_context("call-1", 1, send, make_config(), LlmClients(openai=None, anthropic=None, google=None), http, journal=journal, turn=1)
+        await ctx.progress("reading", "already in the log")
+        await ctx.subprogress("already shown")
+        await ctx.step("new-work", lambda: 2)  # past the journal — replay is over
+        await ctx.progress("drafting", "new")
+
+    assert [p.get("step") for p in sent] == ["drafting"]
+    assert ctx.turn == 1
+
+
+async def test_defaults_to_a_one_shot_call_that_cannot_ask():
+    from z3t_ai_agent.schema import s
+
+    async def send(payload):
+        pass
+
+    async with httpx.AsyncClient() as http:
+        ctx = create_call_context("call-1", 1, send, make_config(), LlmClients(openai=None, anthropic=None, google=None), http)
+        result = await ctx.ask("q", message="Which contract?", schema=s.object({"n": s.string()}))
+
+    assert (ctx.turn, ctx.can_ask, result.action) == (0, False, "unavailable")

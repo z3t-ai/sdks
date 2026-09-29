@@ -7,6 +7,7 @@ except PackageNotFoundError:
 
 from .agent import Agent, Handler
 from .context import CallContext, DownloadResult
+from .journal import AskResult
 from .schema import (
     PdfReference,
     SchemaField,
@@ -24,6 +25,7 @@ __all__ = [
     "Agent",
     "Handler",
     "CallContext",
+    "AskResult",
     "DownloadResult",
     "s",
     "typed_value",

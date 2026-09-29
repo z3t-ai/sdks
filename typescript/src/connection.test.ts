@@ -93,12 +93,49 @@ describe('Connection — call dispatch', () => {
     const conn = new Connection(
       `ws://localhost:${port}`,
       makeConfig(),
-      (callId, schemaVersion, input) => dispatched.push({ callId, schemaVersion, input }),
+      (call) => dispatched.push(call),
     )
     conn.start()
 
     await vi.waitUntil(() => dispatched.length > 0, { timeout: 1000 })
-    expect(dispatched[0]).toEqual({ callId: 'call-99', schemaVersion: 2, input: { x: 1 } })
+    // A relay that predates interactive calls sends none of the new fields — they default to a
+    // one-shot call that can't ask.
+    expect(dispatched[0]).toEqual({
+      callId: 'call-99', schemaVersion: 2, input: { x: 1 }, turn: 0, capabilities: [], canAsk: false,
+    })
+
+    conn.stop()
+    await new Promise((res) => wss.close(res))
+  })
+
+  it('passes turn, capabilities, canAsk, and the resume payload through', async () => {
+    const { wss, port } = startServer()
+    const dispatched: any[] = []
+    const acks: unknown[] = []
+    const resume = { checkpoint: { v: 1, steps: {}, answers: {} }, response: { key: 'gaps', action: 'declined' } }
+
+    wss.on('connection', (ws) => {
+      ws.on('message', (raw) => {
+        const msg = JSON.parse(raw.toString())
+        if (msg.type === 'auth') {
+          ws.send(JSON.stringify({ type: 'auth_ok', agentId: 'agent-1', relayInstanceId: 'relay-1' }))
+          ws.send(JSON.stringify({
+            type: 'call', callId: 'call-7', schemaVersion: 3, input: {}, turn: 2,
+            capabilities: ['progress', 'input'], canAsk: true, resume,
+          }))
+          ws.send(JSON.stringify({ type: 'ack', callId: 'call-7', turn: 1 }))
+        }
+      })
+    })
+
+    const conn = new Connection(`ws://localhost:${port}`, makeConfig(), (call) => dispatched.push(call), [], {
+      onAck: (callId, turn) => acks.push({ callId, turn }),
+    })
+    conn.start()
+
+    await vi.waitUntil(() => dispatched.length > 0 && acks.length > 0, { timeout: 1000 })
+    expect(dispatched[0]).toMatchObject({ turn: 2, capabilities: ['progress', 'input'], canAsk: true, resume })
+    expect(acks[0]).toEqual({ callId: 'call-7', turn: 1 })
 
     conn.stop()
     await new Promise((res) => wss.close(res))

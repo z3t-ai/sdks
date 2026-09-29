@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 import websockets
@@ -9,9 +10,28 @@ from websockets.exceptions import ConnectionClosed
 
 from .types import ResolvedConfig
 
+
+@dataclass
+class IncomingCall:
+    """A call as the relay dispatches it. Fields past ``input`` are absent from relays that predate
+    interactive calls, which is why they're defaulted where the frame is parsed."""
+
+    call_id: str
+    schema_version: int
+    input: Any
+    turn: int = 0
+    capabilities: list[str] = field(default_factory=list)
+    can_ask: bool = False
+    resume: dict[str, Any] | None = None
+
+
 # Called by the Connection whenever the relay dispatches a call to this agent.
-# `send` is bound to the WebSocket that delivered the call.
-CallDispatcher = Callable[[str, int, Any, Callable[[dict[str, Any]], Awaitable[None]]], None]
+#
+# Deliberately carries no send channel. Binding a call's replies to the socket it arrived on is what
+# made a long run unrecoverable: the socket dies mid-call, the closure keeps pointing at it, and every
+# later frame — including the result the user is waiting for — is dropped in silence. Delivery is the
+# Agent's job, across whichever connection is alive when there is something to say.
+CallDispatcher = Callable[[IncomingCall], None]
 
 
 class Connection:
@@ -21,6 +41,9 @@ class Connection:
         config: ResolvedConfig,
         dispatch: CallDispatcher,
         supported_versions: list[int],
+        *,
+        on_ready: Callable[[], Awaitable[None]] | None = None,
+        on_ack: Callable[[str, int | None], None] | None = None,
     ) -> None:
         self._url = url
         self._config = config
@@ -28,9 +51,29 @@ class Connection:
         # Schema versions this agent instance handles — sent in the auth message so the
         # relay can route calls to instances that support the requested version.
         self._supported_versions = supported_versions
+        # The relay has accepted our auth — this connection can carry call traffic now.
+        self._on_ready = on_ready
+        # The relay has durably recorded a turn-terminal frame (result, error, or suspend).
+        self._on_ack = on_ack
         self._stopped = False
         self._reconnect_attempt = 0
         self._ws: Any = None
+        # Frames sent before the relay answers our auth are rejected, so "open" is not enough.
+        self._authenticated = False
+
+    def is_open(self) -> bool:
+        return self._authenticated and self._ws is not None
+
+    async def send(self, payload: dict[str, Any]) -> bool:
+        """Attempts to send on the CURRENT socket. Returns False if this connection can't carry it,
+        so the caller can try another connection or hold the frame."""
+        if not self.is_open():
+            return False
+        try:
+            await self._ws.send(json.dumps(payload))
+            return True
+        except ConnectionClosed:
+            return False
 
     async def run(self) -> None:
         """Connect, authenticate, and process messages until `stop()` is called.
@@ -51,6 +94,7 @@ class Connection:
                     ping_timeout=ping_timeout,
                 ) as ws:
                     self._ws = ws
+                    self._authenticated = False
                     self._reconnect_attempt = 0
                     await self._send_raw(ws, self._auth_message())
                     async for raw in ws:
@@ -61,6 +105,7 @@ class Connection:
                 self._config.logger.error(f"[z3t SDK] WS error on {self._url}: {exc}")
             finally:
                 self._ws = None
+                self._authenticated = False
 
             if self._stopped:
                 return
@@ -86,19 +131,35 @@ class Connection:
         msg_type = msg.get("type")
 
         if msg_type == "auth_ok":
+            self._authenticated = True
             self._config.logger.info(f"[z3t SDK] Authenticated on {self._url} — agentId: {msg.get('agentId')}")
+            # Anything held while every connection was down can go out now.
+            if self._on_ready is not None:
+                await self._on_ready()
 
         elif msg_type == "ping":
             await self._send_raw(ws, {"type": "pong"})
 
         elif msg_type == "call":
-            async def send(payload: dict[str, Any]) -> None:
-                await self._send_raw(ws, payload)
-
-            self._dispatch(msg["callId"], msg["schemaVersion"], msg.get("input"), send)
+            turn = msg.get("turn")
+            capabilities = msg.get("capabilities")
+            self._dispatch(
+                IncomingCall(
+                    call_id=msg["callId"],
+                    schema_version=msg["schemaVersion"],
+                    input=msg.get("input"),
+                    turn=turn if isinstance(turn, int) else 0,
+                    capabilities=list(capabilities) if isinstance(capabilities, list) else [],
+                    can_ask=msg.get("canAsk") is True,
+                    resume=msg.get("resume") if isinstance(msg.get("resume"), dict) else None,
+                )
+            )
 
         elif msg_type == "ack":
-            pass  # no-op — relay acknowledging receipt of a result/error frame
+            # The relay has recorded the turn-terminal frame — the Agent can stop retrying it.
+            if self._on_ack is not None and msg.get("callId"):
+                turn = msg.get("turn")
+                self._on_ack(msg["callId"], turn if isinstance(turn, int) else None)
 
         elif msg_type == "error":
             if not msg.get("callId"):

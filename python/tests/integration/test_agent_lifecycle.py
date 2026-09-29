@@ -26,7 +26,7 @@ async def test_connect_auth_dispatch_result(mock_relay):
         await wait_until(lambda: any(m.get("type") == "result" for m in mock_relay.received))
 
         result = next(m for m in mock_relay.received if m.get("type") == "result")
-        assert result == {"type": "result", "callId": "call-1", "output": {"doubled": 42}}
+        assert result == {"type": "result", "callId": "call-1", "turn": 0, "output": {"doubled": 42}}
     finally:
         await agent.stop()
         task.cancel()
@@ -46,7 +46,7 @@ async def test_handler_exception_sends_error(mock_relay):
         await wait_until(lambda: any(m.get("type") == "error" for m in mock_relay.received))
 
         error = next(m for m in mock_relay.received if m.get("type") == "error")
-        assert error == {"type": "error", "callId": "call-1", "message": "kaboom"}
+        assert error == {"type": "error", "callId": "call-1", "turn": 0, "message": "kaboom"}
     finally:
         await agent.stop()
         task.cancel()
@@ -66,7 +66,7 @@ async def test_handler_timeout_sends_error(mock_relay):
         await wait_until(lambda: any(m.get("type") == "error" for m in mock_relay.received))
 
         error = next(m for m in mock_relay.received if m.get("type") == "error")
-        assert error == {"type": "error", "callId": "call-1", "message": "Handler timeout"}
+        assert error == {"type": "error", "callId": "call-1", "turn": 0, "message": "Handler timeout"}
     finally:
         await agent.stop()
         task.cancel()

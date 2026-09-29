@@ -1,5 +1,5 @@
 import WebSocket from 'ws'
-import type { ResolvedConfig } from './types'
+import type { IncomingCall, ResolvedConfig } from './types'
 
 /** Called by the Connection whenever the relay dispatches a call to this agent.
  *
@@ -8,14 +8,15 @@ import type { ResolvedConfig } from './types'
  *  and every later frame — including the result the user is waiting for — is dropped in silence.
  *  Delivery is the Agent's job, across whichever connection is alive when there is something to
  *  say. See Agent.deliver. */
-export type CallDispatcher = (callId: string, schemaVersion: number, input: unknown) => void
+export type CallDispatcher = (call: IncomingCall) => void
 
 /** Connection lifecycle signals the Agent needs in order to route and confirm delivery. */
 export interface ConnectionHooks {
   /** The relay has accepted our auth — this connection can now carry call traffic. */
   onReady?(): void
-  /** The relay has durably recorded a terminal frame for this call. */
-  onAck?(callId: string): void
+  /** The relay has durably recorded a turn-terminal frame (result, error, or suspend) for this
+   *  call. `turn` is absent from relays that predate interactive calls. */
+  onAck?(callId: string, turn?: number): void
 }
 
 export class Connection {
@@ -168,12 +169,20 @@ export class Connection {
         break
 
       case 'call':
-        this.dispatch(msg.callId as string, msg.schemaVersion as number, msg.input)
+        this.dispatch({
+          callId: msg.callId as string,
+          schemaVersion: msg.schemaVersion as number,
+          input: msg.input,
+          turn: typeof msg.turn === 'number' ? msg.turn : 0,
+          capabilities: Array.isArray(msg.capabilities) ? (msg.capabilities as string[]) : [],
+          canAsk: msg.canAsk === true,
+          ...(msg.resume ? { resume: msg.resume as IncomingCall['resume'] } : {}),
+        })
         break
 
       case 'ack':
-        // The relay has recorded the terminal frame — the Agent can stop retrying it.
-        this.hooks.onAck?.(msg.callId as string)
+        // The relay has recorded the turn-terminal frame — the Agent can stop retrying it.
+        this.hooks.onAck?.(msg.callId as string, typeof msg.turn === 'number' ? msg.turn : undefined)
         break
 
       case 'error':

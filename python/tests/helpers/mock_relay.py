@@ -45,6 +45,12 @@ class MockRelay:
             json.dumps({"type": "call", "callId": call_id, "schemaVersion": schema_version, "input": input})
         )
 
+    async def send_frame(self, frame: dict[str, Any]) -> None:
+        """Send any frame to the connected agent — a call with interactive fields, an ack, …"""
+        if self._active_ws is None:
+            raise RuntimeError("No active WebSocket connection to send to")
+        await self._active_ws.send(json.dumps(frame))
+
     async def close_connections(self) -> None:
         """Force-close the active connected client WebSocket (triggers agent reconnect)."""
         if self._active_ws is not None:

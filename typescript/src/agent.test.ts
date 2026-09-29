@@ -308,3 +308,187 @@ describe('Agent delivery — acknowledgement', () => {
     expect(agent.pending.has('call-1')).toBe(false)
   })
 })
+
+// ─── Interactive calls: suspend and resume ────────────────────────────────────────────────────
+
+describe('Agent — asking the consumer (suspend)', () => {
+  const question = { message: 'Invoice 3 names contract CX-12, which was not uploaded.', schema: { _def: { type: 'object', properties: { contract: { type: 'string', format: 'z3t-file-uri' } } } } as any }
+
+  it('ends the turn with a suspend frame carrying the question and the journal', async () => {
+    const { agent, sent } = makeAgent()
+    const expensive = vi.fn().mockResolvedValue({ gaps: 1 })
+    agent.handle(async (_input, ctx) => {
+      await ctx.step('case-file', expensive)
+      await ctx.ask('gaps', question)
+      return 'never reached'
+    })
+
+    // @ts-expect-error access private
+    agent.processCall({ ...makeCall(), canAsk: true })
+    await vi.waitUntil(() => sent.some((f) => f.type === 'suspend'))
+
+    const frame = sent.find((f) => f.type === 'suspend')
+    expect(frame).toMatchObject({
+      callId: 'call-1', turn: 0,
+      request: { key: 'gaps', message: question.message, schema: question.schema._def },
+      checkpoint: { v: 1, steps: { 'case-file': { value: { gaps: 1 } } }, answers: {} },
+    })
+    expect(sent.some((f) => f.type === 'result' || f.type === 'error')).toBe(false)
+  })
+
+  it('suspends even when the handler swallows the signal, and says so', async () => {
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+    const { agent, sent } = makeAgent({ logger })
+    agent.handle(async (_input, ctx) => {
+      try {
+        await ctx.ask('gaps', question)
+      } catch {
+        // a well-meaning catch-all
+      }
+      return 'a result the consumer never asked for'
+    })
+
+    // @ts-expect-error access private
+    agent.processCall({ ...makeCall(), canAsk: true })
+    await vi.waitUntil(() => sent.length > 0)
+
+    expect(sent[0].type).toBe('suspend')
+    expect(sent.some((f) => f.type === 'result')).toBe(false)
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('caught the suspend signal'))
+  })
+
+  it('accepts a plain JSON Schema object, as the Python SDK does', async () => {
+    const { agent, sent } = makeAgent()
+    const raw = { type: 'object', properties: { n: { type: 'string' } } }
+    agent.handle(async (_input, ctx) => {
+      await ctx.ask('gaps', { message: 'Which contract?', schema: raw as any })
+    })
+
+    // @ts-expect-error access private
+    agent.processCall({ ...makeCall(), canAsk: true })
+    await vi.waitUntil(() => sent.length > 0)
+
+    expect(sent[0]).toMatchObject({ type: 'suspend', request: { key: 'gaps', schema: raw } })
+  })
+
+  it('carries on with `unavailable` when the run cannot ask — no suspend', async () => {
+    const { agent, sent } = makeAgent()
+    agent.handle(async (_input, ctx) => {
+      const r = await ctx.ask('gaps', question)
+      return r.action
+    })
+
+    // @ts-expect-error access private
+    agent.processCall(makeCall()) // canAsk absent → false
+    await vi.waitUntil(() => sent.length > 0)
+
+    expect(sent[0]).toMatchObject({ type: 'result', turn: 0, output: 'unavailable' })
+  })
+
+  it('fails the call with a clear message when the journal is too big to suspend with', async () => {
+    const { agent, sent } = makeAgent()
+    agent.handle(async (_input, ctx) => {
+      await ctx.step('huge', () => 'x'.repeat(3 * 1024 * 1024))
+      await ctx.ask('gaps', question)
+    })
+
+    // @ts-expect-error access private
+    agent.processCall({ ...makeCall(), canAsk: true })
+    await vi.waitUntil(() => sent.length > 0)
+
+    expect(sent[0]).toMatchObject({ type: 'error', message: expect.stringMatching(/over the .* limit/) })
+  })
+})
+
+describe('Agent — resuming', () => {
+  const question = { message: 'Which contract?', schema: { _def: { type: 'object', properties: { n: { type: 'string' } } } } as any }
+
+  it('replays recorded steps without re-running them, returns the answer, and finishes the turn', async () => {
+    const { agent, sent } = makeAgent()
+    const extract = vi.fn().mockResolvedValue('facts')
+    const draft = vi.fn().mockResolvedValue('letter')
+    agent.handle(async (_input, ctx) => {
+      await ctx.progress('extracting', 'Reading documents')
+      const facts = await ctx.step('extract', extract)
+      const r = await ctx.ask<{ n: string }>('gaps', question)
+      await ctx.progress('drafting', 'Writing the letter')
+      const letter = await ctx.step('draft', draft)
+      return { facts, letter, answer: r.action === 'answered' ? r.answers.n : null }
+    })
+
+    // @ts-expect-error access private
+    agent.processCall({
+      ...makeCall(), turn: 1, canAsk: true,
+      resume: {
+        checkpoint: { v: 1, steps: { extract: { value: 'facts' } }, answers: {} },
+        response: { key: 'gaps', action: 'answered', answers: { n: 'CX-12' } },
+      },
+    })
+    await vi.waitUntil(() => sent.some((f) => f.type === 'result'))
+
+    expect(extract).not.toHaveBeenCalled()
+    expect(draft).toHaveBeenCalledOnce()
+    expect(sent.find((f) => f.type === 'result')).toMatchObject({
+      turn: 1, output: { facts: 'facts', letter: 'letter', answer: 'CX-12' },
+    })
+    // The replayed milestone is already in the activity log; only the new one is sent.
+    const steps = sent.filter((f) => f.type === 'progress').map((f) => f.step)
+    expect(steps).toEqual(['drafting'])
+  })
+})
+
+describe('Agent delivery — per-turn acknowledgement', () => {
+  beforeEach(() => { vi.useFakeTimers() })
+  afterEach(() => { vi.useRealTimers() })
+
+  it('does not let the ack of an earlier turn settle a later one', async () => {
+    const conn = fakeConn(true)
+    const agent = agentWith([conn])
+    agent.handle(async () => 'finished')
+
+    // @ts-expect-error access private
+    agent.processCall({ ...makeCall(), turn: 1 })
+    await vi.advanceTimersByTimeAsync(0)
+
+    // @ts-expect-error access private
+    agent.settle('call-1', 0)
+    // @ts-expect-error access private
+    expect(agent.pending.has('call-1#1')).toBe(true)
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(conn.sent.filter((f) => f.type === 'result')).toHaveLength(2) // still retrying
+
+    // @ts-expect-error access private
+    agent.settle('call-1', 1)
+    // @ts-expect-error access private
+    expect(agent.pending.size).toBe(0)
+  })
+
+  it('leaves no handler-timeout timer behind once the call is settled', async () => {
+    const conn = fakeConn(true)
+    const agent = agentWith([conn])
+    agent.handle(async () => 'finished')
+
+    // @ts-expect-error access private
+    agent.processCall(makeCall())
+    await vi.advanceTimersByTimeAsync(0)
+    // @ts-expect-error access private
+    agent.settle('call-1', 0)
+
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('treats an ack without a turn (an older relay) as settling every turn of the call', async () => {
+    const conn = fakeConn(true)
+    const agent = agentWith([conn])
+    agent.handle(async () => 'finished')
+
+    // @ts-expect-error access private
+    agent.processCall({ ...makeCall(), turn: 2 })
+    await vi.advanceTimersByTimeAsync(0)
+    // @ts-expect-error access private
+    agent.settle('call-1')
+
+    // @ts-expect-error access private
+    expect(agent.pending.size).toBe(0)
+  })
+})

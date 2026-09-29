@@ -1,5 +1,14 @@
-import type { CallContext, ResolvedConfig, TaxonomyEntry, WsSend } from './types'
+import type { AskResult, CallContext, ResolvedConfig, TaxonomyEntry, WsSend } from './types'
 import type { LlmClients } from './llm'
+import { CallJournal } from './journal'
+
+/** Per-turn state of an interactive call. Absent for callers that don't care (tests, tools), which
+ *  get a fresh journal on turn 0 with asking disabled — i.e. exactly the pre-interactive behaviour. */
+export interface TurnState {
+  journal: CallJournal
+  canAsk: boolean
+  turn: number
+}
 
 /** Extract the resource ID from a z3t:// URI (e.g. z3t://files/abc123 → abc123) */
 export function extractId(uri: string): string {
@@ -37,14 +46,31 @@ export function createCallContext(
   send: WsSend,
   config: ResolvedConfig,
   llm: LlmClients,
+  turnState: TurnState = { journal: new CallJournal(), canAsk: false, turn: 0 },
 ): CallContext {
   const { apiKey, baseUrl } = config
+  const { journal, canAsk, turn } = turnState
 
   return {
     callId,
     schemaVersion,
+    turn,
+    canAsk,
 
+    step(key, fn) {
+      return journal.step(key, fn)
+    },
+
+    async ask<A>(key: string, options: { message: string; schema: { _def: Record<string, unknown> } }): Promise<AskResult<A>> {
+      // A plain JSON Schema object is accepted too (from JavaScript, or cast), as the Python SDK does.
+      const schema = options.schema?._def ?? (options.schema as unknown as Record<string, unknown>)
+      return journal.ask(key, { message: options.message, schema }, canAsk) as AskResult<A>
+    },
+
+    // Both kinds of progress are silent while a resumed turn re-runs code from an earlier turn —
+    // those rows are already in the caller's activity log.
     async progress(step, message, progress) {
+      if (journal.replaying) return
       send({
         type: 'progress',
         callId,
@@ -55,6 +81,7 @@ export function createCallContext(
     },
 
     async subprogress(message, progress) {
+      if (journal.replaying) return
       send({
         type: 'subprogress',
         callId,

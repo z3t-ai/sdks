@@ -7,6 +7,7 @@ from typing import Any, Awaitable, Callable
 
 import httpx
 
+from .journal import AskResult, CallJournal
 from .llm import LlmClients
 from .types import ResolvedConfig, TaxonomyEntry
 
@@ -112,12 +113,34 @@ class AgentsContext:
 class CallContext:
     call_id: str
     schema_version: int
+    #: Report a progress milestone — each call adds a row to the caller's activity log, so emit
+    #: one per stage. ``progress(step, message, progress=None)``.
     progress: Callable[..., Awaitable[None]]
+    #: Detail *within* the current step — REPLACES the previous sub-line rather than adding a row,
+    #: so a long stage can report often ("page 7 of 12"). ``subprogress(message, progress=None)``.
+    subprogress: Callable[..., Awaitable[None]]
     files: FilesContext
     taxonomies: TaxonomiesContext
     integrations: IntegrationsContext
     llm: LlmClients
     agents: AgentsContext
+    #: Runs ``fn`` once per call and remembers its result across a suspend/resume: on a resumed
+    #: turn the stored result is returned without running ``fn`` again, so an expensive LLM pass
+    #: before a question is paid for once. The result must be JSON-serializable and is returned in
+    #: its JSON form even on the first run. Keys must be unique per call. ``fn`` may be sync or
+    #: async. Wrap anything with a side effect you must not repeat (an upload) in a step — code
+    #: outside steps runs again on every resume.
+    step: Callable[..., Awaitable[Any]]
+    #: Asks the consumer a clarifying question and pauses the run until they answer — hours or
+    #: days later, possibly on another replica. The handler exits here and is re-run from the top
+    #: on resume (see ``step``); ``ask`` then returns an ``AskResult``. Requires the version to be
+    #: declared ``interactive=True``. ``ask(key, *, message, schema)`` — ``schema`` is an
+    #: ``s.object(...)`` of scalars, enums, dates and file uploads.
+    ask: Callable[..., Awaitable[AskResult]]
+    #: Which turn of the call this is: 0 on the first dispatch, +1 after every answered question.
+    turn: int = 0
+    #: Whether ``ask`` can suspend this run. When False, ``ask`` returns ``unavailable`` at once.
+    can_ask: bool = False
 
 
 # ─── Factory ─────────────────────────────────────────────────────────────────
@@ -130,14 +153,40 @@ def create_call_context(
     config: ResolvedConfig,
     llm: LlmClients,
     http: httpx.AsyncClient,
+    *,
+    journal: CallJournal | None = None,
+    can_ask: bool = False,
+    turn: int = 0,
 ) -> CallContext:
     api_key, base_url = config.api_key, config.base_url
+    # Absent for callers that don't care (tests, tools): a fresh journal on turn 0 with asking
+    # disabled — exactly the pre-interactive behaviour.
+    call_journal = journal if journal is not None else CallJournal()
 
+    # Both kinds of progress are silent while a resumed turn re-runs code from an earlier turn —
+    # those rows are already in the caller's activity log.
     async def progress(step: str, message: str, progress: float | None = None) -> None:
+        if call_journal.replaying:
+            return
         payload: dict[str, Any] = {"type": "progress", "callId": call_id, "step": step, "message": message}
         if progress is not None:
             payload["progress"] = progress
         await send(payload)
+
+    async def subprogress(message: str, progress: float | None = None) -> None:
+        if call_journal.replaying:
+            return
+        payload: dict[str, Any] = {"type": "subprogress", "callId": call_id, "message": message}
+        if progress is not None:
+            payload["progress"] = progress
+        await send(payload)
+
+    async def step(key: str, fn: Callable[[], Any]) -> Any:
+        return await call_journal.step(key, fn)
+
+    async def ask(key: str, *, message: str, schema: Any) -> AskResult:
+        schema_def = getattr(schema, "_def", schema)
+        return call_journal.ask(key, message, schema_def, can_ask)
 
     async def download(uri: str) -> DownloadResult:
         resource_id = extract_id(uri)
@@ -247,9 +296,14 @@ def create_call_context(
         call_id=call_id,
         schema_version=schema_version,
         progress=progress,
+        subprogress=subprogress,
         files=FilesContext(_download=download, _upload=upload),
         taxonomies=TaxonomiesContext(_entries=taxonomy_entries, _lookup=taxonomy_lookup),
         integrations=IntegrationsContext(_credentials=credentials),
         llm=llm,
         agents=AgentsContext(_call=agents_call),
+        step=step,
+        ask=ask,
+        turn=turn,
+        can_ask=can_ask,
     )
