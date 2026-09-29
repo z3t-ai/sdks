@@ -295,6 +295,70 @@ for (const [i, page] of pages.entries()) {
 
 ---
 
+## Asking the consumer a question
+
+Consumers rarely fill in a form perfectly. An **interactive** version can read what it received,
+notice what is missing or contradictory, and ask — like a person handling the request would —
+before it does the expensive work:
+
+```typescript
+agent.handle(3, {
+  input:  s.object({ invoices: s.array(s.fileUri()) }),
+  output: s.object({ notice: s.fileOutput() }),
+  interactive: true,          // this version may pause a run to ask (frozen once active)
+}, async (input, ctx) => {
+  const facts = await ctx.step('extract', () => extractFacts(input, ctx))   // paid for once
+
+  if (facts.missingContract) {
+    const r = await ctx.ask<{ contract?: string }>('contract', {
+      message: `Invoice 3 refers to contract **${facts.contractNo}**, which wasn't uploaded. ` +
+               `Can you upload it?`,
+      schema: s.object({ contract: s.fileUri({ title: 'Contract' }).optional() }),
+    })
+    if (r.action === 'answered' && r.answers.contract) facts.contract = r.answers.contract
+    // 'declined' | 'expired' | 'unavailable' → carry on with a stated assumption
+  }
+
+  return ctx.step('draft', () => draftNotice(facts, ctx))
+})
+```
+
+**How it works.** `ctx.ask` does not wait for the answer — that could take days. It ends the turn:
+your handler stops, the platform shows the consumer the question (and emails them), and when they
+answer, skip, or the deadline passes, the call is dispatched again — possibly to another replica of
+your agent. Your handler **runs from the top**: `ctx.step` returns what it returned last time
+instead of running again, and `ctx.ask` returns the outcome.
+
+| Outcome | When |
+|---|---|
+| `{ action: 'answered', answers }` | The consumer filled in the form — `answers` matches your schema |
+| `{ action: 'declined' }` | The consumer skipped the question |
+| `{ action: 'expired' }` | Nobody answered within the deadline (7 days) — the run is not refunded, so finish with your best effort |
+| `{ action: 'unavailable' }` | This run can't take questions (the caller is an API integration that didn't opt in, or another agent; or the call used its 3 questions). Nothing was paused. |
+
+`ask` never throws for these — every outcome is a value, so there is always a best-effort path.
+`ctx.canAsk` tells you up front whether asking is possible on this run.
+
+**Rules of thumb**
+
+- **Put expensive or side-effecting work in a `ctx.step`.** Code outside steps runs again on every
+  resume. Uploads belong inside a step, or they happen twice.
+- **Step results must be JSON-serializable**, and come back in their JSON form (a `Date` becomes a
+  string) — on the first run too, so you notice immediately. Keep them small: the whole journal is
+  capped at 2 MB; upload big artifacts with `ctx.files.upload` and keep the URI.
+- **Keys are unique per call**, across steps and questions.
+- **Ask early**, before the costly part, and only when the answer would change the result.
+- **Let the pause propagate.** `ctx.ask` unwinds your handler by throwing; a `try/catch` around it
+  doesn't stop the pause (the SDK suspends anyway and logs a warning), but it is a sign of a bug.
+- The handler `timeout` applies **per turn**.
+- The question form (`schema`) is a flat `s.object(...)` of strings, numbers, booleans, enums, dates,
+  and file uploads (or arrays of those) — at most 20 fields.
+
+Nothing about the call is cached on your machine: the platform hands the journal back with the
+resume, and deletes it when the call ends.
+
+---
+
 ## Context API (`ctx`)
 
 ### Files

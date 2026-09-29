@@ -412,4 +412,8 @@ export interface VersionSchema<I = unknown, O = unknown> {
   deprecates?: number[]
   /** Human-readable migration note shown to consumers of deprecated versions */
   deprecationNotice?: string
+  /** This version may pause a run to ask the consumer clarifying questions (`ctx.ask`). Consumers
+   *  are told before they run it — an unanswered question is not refunded — so, like the schemas,
+   *  it can't change once the version is active. Default: false. */
+  interactive?: boolean
 }

@@ -225,4 +225,25 @@ describe('Agent lifecycle', () => {
       expect.objectContaining({ version: 1, status: 'active' }),
     ])
   })
+
+  it('syncs interactive: true, and omits the key when a version does not declare it', async () => {
+    relay = createMockRelay()
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ ok: true, syncedVersions: [1, 2], deprecatedVersions: [], versions: [] }),
+    } as Response)
+
+    agent = makeAgent(relay.port)
+    agent.handle(1, { input: s.object({ q: s.string() }), output: s.object({ a: s.string() }) }, async () => ({ a: 'ok' }))
+    agent.handle(2, { input: s.object({ q: s.string() }), output: s.object({ a: s.string() }), interactive: true }, async () => ({ a: 'ok' }))
+    agent.start()
+
+    await vi.waitUntil(() => fetchSpy.mock.calls.length > 0, { timeout: 1000 })
+
+    const body = JSON.parse((fetchSpy.mock.calls[0][1] as RequestInit).body as string)
+    const byVersion = Object.fromEntries(body.versions.map((v: any) => [v.version, v]))
+    expect(byVersion[2].interactive).toBe(true)
+    // Older platforms reject nothing they don't know, but omitting keeps v1's payload byte-identical.
+    expect(byVersion[1]).not.toHaveProperty('interactive')
+  })
 })

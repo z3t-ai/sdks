@@ -58,14 +58,16 @@ A developer installs the package, writes one or more handler functions, and call
 These rules apply regardless of language. Everything else in this document is detail
 in service of these:
 
-1. **Exactly one terminal frame per `callId`, delivered — not merely sent.** Every
-   dispatched call ends with a `result` or `error` frame, and the SDK must keep trying
-   until the relay `ack`s it (see §5.2). Writing it once to a socket is not enough: a
+1. **Exactly one turn-terminal frame per `(callId, turn)`, delivered — not merely sent.**
+   Every dispatch ends with a `result`, `error`, or `suspend` frame (`suspend` only for an
+   interactive call pausing to ask the consumer a question — see §6.1), and the SDK must keep
+   trying until the relay `ack`s it (see §5.2). A call that never suspends has a single
+   turn, 0, and so exactly one terminal frame. Writing it once to a socket is not enough: a
    socket accepts bytes right up until it doesn't, and a result lost this way leaves the
    call running until the platform reaps it — the user is told their run timed out on
-   work that actually completed. The relay's handlers are keyed by `callId` and guarded
-   on the call still being live, so a duplicate is a no-op; that is what makes retrying
-   safe. `progress`/`subprogress` frames may be sent zero or more times before the terminal frame and
+   work that actually completed. The relay's handlers are keyed by `callId` and `turn` and
+   guarded on the call still being live, so a duplicate is a no-op; that is what makes
+   retrying safe. `progress`/`subprogress` frames may be sent zero or more times before the terminal frame and
    are best-effort — never retried.
 2. **Never block the WebSocket read loop on a handler.** Each call must run as an
    independent concurrent unit (goroutine, task, green thread, etc.) so other calls —
@@ -147,11 +149,19 @@ CONNECT wss://{relayUrl}        — one per URL
 ← { type: 'ping' }
     → immediately send { type: 'pong' }
 
-← { type: 'call', callId, schemaVersion, input }
+← { type: 'call', callId, schemaVersion, input, turn, capabilities, canAsk, resume? }
     → dispatch to your concurrency manager (see §6)
+    turn          0 on the first dispatch; +1 for every resume (§6.1). Absent from
+                  relays that predate interactive calls — treat as 0.
+    capabilities  what the caller supports ('progress', 'input'); informational.
+    canAsk        whether ctx.ask may suspend this turn (§6.1). Absent → false.
+    resume        present only when resuming: { checkpoint, response } (§6.1).
 
-→ { type: 'result', callId, output }      — handler resolved
-→ { type: 'error',  callId, message }     — handler threw / timed out / no handler
+→ { type: 'result',  callId, turn, output }   — handler resolved
+→ { type: 'error',   callId, turn, message }  — handler threw / timed out / no handler
+→ { type: 'suspend', callId, turn, request: { key, message, schema }, checkpoint }
+        — the handler asked the consumer a question (§6.1). Turn-terminal, delivered
+        and acked exactly like result/error.
 → { type: 'subprogress', callId, message, progress? }      — fire-and-forget detail
         about the step already running; REPLACES the previous one instead of adding
         a row, carries no `step` (it binds to the newest progress event), and is
@@ -160,8 +170,10 @@ CONNECT wss://{relayUrl}        — one per URL
         zero or more times before the terminal frame; omit `progress` key if
         the caller didn't pass a value (don't send null)
 
-← { type: 'ack', callId }
-    the relay has durably recorded your terminal frame for this call.
+← { type: 'ack', callId, turn? }
+    the relay has durably recorded your turn-terminal frame for this call and turn.
+    An ack without `turn` comes from a relay that predates interactive calls —
+    settle every pending frame for that callId.
     Stop retrying it (see §5.2). This is the ONLY confirmation that the
     result arrived — a successful socket write is not one.
 
@@ -240,8 +252,9 @@ Three rules avoid it:
 1. **Delivery belongs to the agent, not the connection.** Resolve a live connection at send time
    and use it. Never capture a socket in a per-call closure. Any authenticated connection can carry
    any call's frames, including one to a different relay instance than the call arrived on.
-2. **Hold terminal frames until acknowledged.** Keep unacked `result`/`error` frames in a map keyed
-   by `callId`. Re-send on an interval (~5s), and immediately after any connection authenticates —
+2. **Hold terminal frames until acknowledged.** Keep unacked `result`/`error`/`suspend` frames in a
+   map keyed by `callId` **and `turn`** — a resumed call reuses its callId, and the ack of turn 0's
+   `suspend` must never settle turn 1's `result`. Re-send on an interval (~5s), and immediately after any connection authenticates —
    a reconnect is the most likely reason delivery failed. Clear the entry on `ack`. Give up only
    after a bound comfortably longer than the platform's call timeout (~10 minutes), and log loudly
    when you do.
@@ -284,8 +297,54 @@ version {schemaVersion}' }` immediately and stop — this does not consume a
      (structured concurrency, cancellation tokens, context cancellation), prefer
      actually cancelling the handler on timeout instead — just make sure the
      cancelled task can't still emit a result/error frame afterward.
-5. **On settlement** (success, error, or timeout), decrement the active count and
+5. **On settlement** (success, error, timeout, or suspend), decrement the active count and
    pull the next queued call, if any, into a free slot.
+
+Every terminal frame carries the dispatch's `turn`. The handler timeout applies **per turn**: a
+resumed call gets a fresh timer, not what was left of the first one.
+
+### 6.1 Interactive calls: suspend and resume
+
+A version declared `interactive` (§9) may pause a run to ask the consumer a clarifying question —
+and the answer may come hours or days later. The handler must **not** wait for it: a waiting
+handler would hold a concurrency slot, die on every deploy, and pin the call to one process.
+Instead the turn ends, and the platform re-dispatches the call when there is an answer. The SDK
+offers two context methods for this:
+
+- **`ctx.step(key, fn)`** — runs `fn` once per call and records its JSON result in the call's
+  **journal**. On a resumed turn it returns the recorded value without running `fn` again, so work
+  done before a question (an expensive model pass) is paid for once. Return the JSON round-tripped
+  value even on the first run, so a non-serializable result fails immediately rather than on resume.
+- **`ctx.ask(key, { message, schema })`** — if the journal holds an outcome for `key`, return it.
+  Otherwise, if `canAsk` is false, record and return `{ action: 'unavailable' }` without suspending.
+  Otherwise record the question as pending and unwind the handler (throw a signal the handler
+  shouldn't catch — Python: a `BaseException` subclass so `except Exception` can't swallow it).
+
+Outcomes are values, never exceptions: `answered` (with `answers`), `declined` (the consumer
+skipped), `expired` (the deadline passed), `unavailable`. Keys are unique per call across both
+methods; reject a duplicate.
+
+**Ending the turn.** When the handler settles (whatever it returned or threw), if a question is
+pending, send `suspend` instead of `result`/`error` — even if the handler caught the signal and
+returned (log a warning). `request` is `{ key, message, schema }` (`schema` is the JSON Schema of an
+`s.object(...)` answer form); `checkpoint` is the whole journal:
+
+```
+{ v: 1, steps: { [key]: { value } }, answers: { [key]: { action, answers? } } }
+```
+
+Cap it at **2 MB** of compact JSON (the relay enforces the same limit) and fail the call with a
+clear `error` instead of sending an oversized suspend.
+
+**Resuming.** The resume dispatch carries `resume: { checkpoint, response }`, where `response` is
+`{ key, action, answers?, respondedAt }`. Seed the journal from `checkpoint`, add `response` under
+`answers[key]`, and run the handler from the top. While re-running code that already ran — until
+the first step not in the journal, or until `ctx.ask` returns the answer this turn delivers — drop
+`progress`/`subprogress` frames: those rows are already in the consumer's activity log.
+
+**Do not cache the journal locally.** The platform pushes it inside the resume frame, so there is
+nothing to fetch; a resume may land on any replica; and the journal holds the consumer's data,
+which must stay where the platform's retention and erasure can reach it.
 
 ## 7. CallContext: resource access
 
@@ -411,6 +470,7 @@ body: {
       status: 'draft' | 'active',     // default 'draft' if omitted
       deprecates?: number[],           // omit key if empty
       deprecationNotice?: string,      // omit key if not set
+      interactive?: boolean,           // may pause runs to ask (§6.1); omit if not declared
     },
     ...
   ]
@@ -427,6 +487,12 @@ resync on every restart while iterating. `'active'` publishes the schema and fre
 it; resyncing an already-active version with different content will fail. Log a
 clear message for any version that came back `'draft'` so the developer knows it's
 not yet publicly visible, and log any `deprecatedVersions` returned.
+
+`interactive` is frozen with the schema: once a version is active, syncing it with a
+different `interactive` value fails like a schema change. Consumers are told before
+they run an interactive version that it may ask them questions (an unanswered one is
+not refunded), so it can't change under them. The relay rejects a `suspend` from a
+version that didn't declare it.
 
 ## 10. Schema wire format reference
 
@@ -593,6 +659,18 @@ demand, and a way to force-close the connection to test reconnect. Then verify:
   in-process, assert instead that `heartbeatInterval` is threaded into the transport's
   keepalive config, and that `0` disables it.)
 - `ctx.agents.call(...)` request body always has `capabilities: []`
+- **Suspend → resume across processes**: dispatch with `canAsk: true` → the handler
+  runs a `ctx.step` then `ctx.ask` → a `suspend` frame (right `turn`, `request`, journal
+  `checkpoint`) is observed; then a *fresh* agent instance receives a resume dispatch with
+  that checkpoint and a response → the step's function does **not** run again, `ctx.ask`
+  returns the answer, replayed `progress` is not re-sent, and a `result` with the new
+  `turn` is observed
+- `canAsk: false` → `ctx.ask` returns `unavailable` and the call completes without
+  suspending
+- A handler that catches the suspend signal still suspends; an oversized journal
+  becomes an `error` frame
+- Delivery per turn: the ack of an earlier turn does not settle a later turn's frame;
+  an ack without `turn` settles every turn of the call
 
 Target ~90% line coverage. No external services needed — the mock relay and a
 mocked HTTP layer should make the whole suite self-contained, runnable in CI without
@@ -643,7 +721,9 @@ stable.
 - Every HTTP path, method, and body shape in §7 and §9
 - The JSON Schema `format` values and `x-z3t-*` keys in §10
 - The reconnect backoff formula
-- The "exactly one terminal frame per callId" invariant
+- The "exactly one turn-terminal frame per (callId, turn)" invariant
+- The journal/checkpoint shape in §6.1 — a resume may land on another SDK's process in a
+  mixed fleet, so it must round-trip between implementations
 - Omitting optional keys entirely rather than sending `null` (every "omit if not set"
   note above matters — the relay's JSON parsing distinguishes absent from null)
 

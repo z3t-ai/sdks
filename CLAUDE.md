@@ -43,7 +43,8 @@ Both suites are self-contained — they spin up an in-process mock relay and moc
 |------|------|
 | `agent.ts` | `Agent` class, handler registration, concurrency/queueing |
 | `connection.ts` | WebSocket lifecycle: auth, heartbeat, reconnect |
-| `context.ts` | `CallContext` — files/taxonomies/integrations/agents HTTP calls |
+| `context.ts` | `CallContext` — files/taxonomies/integrations/agents HTTP calls, `step`/`ask` |
+| `journal.ts` | `CallJournal` — memoized steps + answers for suspend/resume, `SuspendSignal` |
 | `llm.ts` | Pre-configured OpenAI/Anthropic/Google proxy clients (built per call) |
 | `schema.ts` | `s.*` builder — emits JSON Schema + `x-z3t-*` extensions |
 | `types.ts` | `AgentConfig`, `CallContext`, `Handler`, defaults |
@@ -55,7 +56,8 @@ Both suites are self-contained — they spin up an in-process mock relay and moc
 |------|------|
 | `agent.py` | `Agent` class, `handle()` decorator factory, lifecycle |
 | `connection.py` | websockets-based loop: auth, heartbeat, reconnect |
-| `context.py` | `CallContext` dataclass + all `ctx.*` implementations |
+| `context.py` | `CallContext` dataclass + all `ctx.*` implementations (incl. `subprogress`, `step`, `ask`) |
+| `journal.py` | `CallJournal`, `AskResult`, `SuspendSignal` (a `BaseException`) — mirrors `journal.ts` |
 | `llm.py` | `create_llm_clients()` — proxy clients built per call |
 | `schema.py` | `s` builder — same JSON Schema + `x-z3t-*` wire format as TypeScript |
 | `types.py` | `ResolvedConfig`, `Logger` protocol, `TaxonomyEntry`, defaults |
@@ -68,15 +70,30 @@ Both suites are self-contained — they spin up an in-process mock relay and moc
 ```
 → { type: 'auth', apiKey, supportedVersions: number[] }
 ← { type: 'auth_ok', agentId, relayInstanceId }
-← { type: 'call', callId, schemaVersion, input }
-→ { type: 'result', callId, output }
-→ { type: 'error', callId, message }
+← { type: 'call', callId, schemaVersion, input, turn, capabilities, canAsk, resume? }
+→ { type: 'result', callId, turn, output }
+→ { type: 'error', callId, turn, message }
+→ { type: 'suspend', callId, turn, request: { key, message, schema }, checkpoint }
 → { type: 'progress', callId, step, message, progress? }
 → { type: 'subprogress', callId, message, progress? }
 ← { type: 'ping' }
 → { type: 'pong' }
-← { type: 'ack', callId }
+← { type: 'ack', callId, turn? }
 ```
+
+**Interactive calls — suspend and resume (added 2026-09-29).** A version synced with
+`interactive: true` may pause a run to ask the consumer a question (`ctx.ask`). The handler does
+not wait: `ask` records the question in the call's `CallJournal` and throws `SuspendSignal`; the
+agent's turn-finisher sends `suspend` with the question and the journal (`{ v: 1, steps, answers }`,
+≤ 2 MB compact JSON), whatever the handler did with the throw. The platform re-dispatches the call
+as `turn + 1` with `resume: { checkpoint, response }`; the handler re-runs from the top, `ctx.step`
+returns journaled values without re-running, `ctx.ask` returns the outcome, and progress is
+suppressed while replaying. `ask` outcomes are values (`answered`/`declined`/`expired`/`unavailable`),
+never exceptions. The pending map is keyed by `callId` + `turn` (turn 0 keeps the bare callId), and
+an ack without `turn` (an older relay) settles every turn of the call. **No local caching of the
+journal, by design** — the relay pushes it in the resume frame, a resume can land on any replica,
+and it holds consumer data that must stay under platform retention/erasure. Contract:
+`BUILDING_AN_SDK.md §6.1`; platform side: `backend/shared/src/interactions.ts`.
 
 **Delivery is at-least-once, and `ack` is what closes the loop.** Both SDKs route frames through
 the `Agent` (`_deliver` / `deliver`), which picks a live connection at send time rather than
@@ -86,6 +103,10 @@ actually finished. Terminal frames are held in a pending map and re-sent every 5
 on any `auth_ok`, until the relay acks; the SDK gives up after 10 minutes and logs. The relay's
 handlers are guarded on the call still being live, so duplicates are no-ops. `progress` and
 `subprogress` are best-effort: bounded queue (50 frames), dropped past the cap, never retried.
+**Python reached parity on 2026-09-29** — before that it bound replies to the arrival socket,
+ignored `ack`, never retried, and had no `subprogress`; this paragraph described TypeScript only.
+The Python retry constants are module-level in `agent.py` (`RESULT_RETRY_S`,
+`RESULT_RETRY_TIMEOUT_S`, `OUTBOX_MAX`) so tests can shrink them with `monkeypatch`.
 
 **`progress` vs `subprogress` (added in 0.2.0).** `progress` is a milestone — the platform persists
 it and the caller's UI adds a row per event. `subprogress` is detail about the step already running:

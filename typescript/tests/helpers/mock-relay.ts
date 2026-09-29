@@ -7,6 +7,8 @@ export interface MockRelay {
   received: unknown[]
   /** Dispatch a call to the agent (after auth) */
   dispatch(callId: string, input: unknown, schemaVersion?: number): void
+  /** Send any frame to the connected agent — a call with interactive fields, an ack, … */
+  sendFrame(frame: Record<string, unknown>): void
   /** Force-close all connected client WebSockets (triggers agent reconnect) */
   closeConnections(): void
   /** Close the server */
@@ -54,6 +56,13 @@ export function createMockRelay(): MockRelay {
         throw new Error('No active WebSocket connection to dispatch to')
       }
       activeWs.send(JSON.stringify({ type: 'call', callId, schemaVersion, input }))
+    },
+
+    sendFrame(frame) {
+      if (!activeWs || activeWs.readyState !== WebSocket.OPEN) {
+        throw new Error('No active WebSocket connection to send to')
+      }
+      activeWs.send(JSON.stringify(frame))
     },
 
     close() {

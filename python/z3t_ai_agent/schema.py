@@ -414,3 +414,7 @@ class VersionSchema:
     deprecates: list[int] | None = None
     # Human-readable migration note shown to consumers of deprecated versions.
     deprecation_notice: str | None = None
+    # This version may pause a run to ask the consumer clarifying questions (ctx.ask). Consumers
+    # are told before they run it — an unanswered question is not refunded — so, like the schemas,
+    # it can't change once the version is active. None (the default) omits it from the sync.
+    interactive: bool | None = None

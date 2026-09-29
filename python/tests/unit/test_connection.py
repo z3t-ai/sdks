@@ -223,3 +223,74 @@ async def test_keepalive_disabled_when_interval_zero(monkeypatch):
     # interval 0 → keepalive fully disabled
     assert captured["ping_interval"] is None
     assert captured["ping_timeout"] is None
+
+
+async def test_call_frame_defaults_when_the_relay_predates_interactive_calls(mock_relay):
+    dispatched = []
+    conn = Connection(f"ws://localhost:{mock_relay.port}", make_config(), dispatched.append, [])
+    task = asyncio.create_task(conn.run())
+    try:
+        await wait_until(lambda: len(mock_relay.received) >= 1)
+        await mock_relay.dispatch("call-1", {"x": 1}, schema_version=2)
+        await wait_until(lambda: len(dispatched) == 1)
+        c = dispatched[0]
+        assert (c.call_id, c.schema_version, c.input) == ("call-1", 2, {"x": 1})
+        assert (c.turn, c.capabilities, c.can_ask, c.resume) == (0, [], False, None)
+    finally:
+        await conn.stop()
+        task.cancel()
+
+
+async def test_call_frame_passes_turn_capabilities_can_ask_and_resume(mock_relay):
+    dispatched = []
+    resume = {"checkpoint": {"v": 1, "steps": {}, "answers": {}}, "response": {"key": "q", "action": "declined"}}
+    conn = Connection(f"ws://localhost:{mock_relay.port}", make_config(), dispatched.append, [])
+    task = asyncio.create_task(conn.run())
+    try:
+        await wait_until(lambda: len(mock_relay.received) >= 1)
+        await mock_relay.send_frame({
+            "type": "call", "callId": "call-7", "schemaVersion": 3, "input": {}, "turn": 2,
+            "capabilities": ["progress", "input"], "canAsk": True, "resume": resume,
+        })
+        await wait_until(lambda: len(dispatched) == 1)
+        c = dispatched[0]
+        assert (c.turn, c.capabilities, c.can_ask, c.resume) == (2, ["progress", "input"], True, resume)
+    finally:
+        await conn.stop()
+        task.cancel()
+
+
+async def test_ack_reports_call_and_turn(mock_relay):
+    acks = []
+    conn = Connection(
+        f"ws://localhost:{mock_relay.port}", make_config(), lambda c: None, [],
+        on_ack=lambda call_id, turn: acks.append((call_id, turn)),
+    )
+    task = asyncio.create_task(conn.run())
+    try:
+        await wait_until(lambda: len(mock_relay.received) >= 1)
+        await mock_relay.send_frame({"type": "ack", "callId": "call-1", "turn": 1})
+        await mock_relay.send_frame({"type": "ack", "callId": "call-2"})  # an older relay
+        await wait_until(lambda: len(acks) == 2)
+        assert acks == [("call-1", 1), ("call-2", None)]
+    finally:
+        await conn.stop()
+        task.cancel()
+
+
+async def test_send_refuses_until_authenticated_then_signals_ready(mock_relay):
+    ready = []
+
+    async def on_ready():
+        ready.append(True)
+
+    conn = Connection(f"ws://localhost:{mock_relay.port}", make_config(), lambda c: None, [], on_ready=on_ready)
+    assert await conn.send({"type": "progress"}) is False  # not even connected
+    task = asyncio.create_task(conn.run())
+    try:
+        await wait_until(lambda: len(ready) == 1)
+        assert conn.is_open()
+        assert await conn.send({"type": "pong"}) is True
+    finally:
+        await conn.stop()
+        task.cancel()

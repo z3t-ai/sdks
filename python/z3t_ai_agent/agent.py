@@ -1,26 +1,47 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 import httpx
 
-from .connection import Connection
-from .context import CallContext, Send, create_call_context
+from .connection import Connection, IncomingCall
+from .context import CallContext, create_call_context
+from .journal import CallJournal, SuspendSignal
 from .llm import create_llm_clients
 from .schema import VersionSchema
 from .types import DEFAULTS, Logger, ResolvedConfig
 
 Handler = Callable[[Any, CallContext], Awaitable[Any]]
 
+# Kept as a name for callers/tests that queue calls directly.
+_QueuedCall = IncomingCall
+
+#: How often an unacknowledged turn-terminal frame is re-sent (seconds).
+RESULT_RETRY_S = 5.0
+#: How long to keep retrying before giving up and logging. Comfortably longer than any relay
+#: reconnect, and longer than the platform's own run ceiling, so we stop only once nobody could
+#: still be waiting for the answer.
+RESULT_RETRY_TIMEOUT_S = 10 * 60.0
+#: Cap on best-effort frames held while every connection is down. Turn-terminal frames are never
+#: dropped — they live in the pending map and are retried — so this only bounds telemetry.
+OUTBOX_MAX = 50
+
+
+def _pending_key(call_id: str, turn: int) -> str:
+    """A suspended call comes back as a new turn of the same call id, so the key must tell turns
+    apart — or the ack of turn 0's suspend could settle turn 1's result. Turn 0 keeps the bare id."""
+    return call_id if turn == 0 else f"{call_id}#{turn}"
+
 
 @dataclass
-class _QueuedCall:
+class _Pending:
     call_id: str
-    schema_version: int
-    input: Any
-    send: Send
+    payload: dict[str, Any]
+    since: float
+    task: asyncio.Task[None] | None = None
 
 
 class Agent:
@@ -58,8 +79,16 @@ class Agent:
         self._version_schemas: dict[int, VersionSchema] = {}
         self._connections: list[Connection] = []
         self._active_count = 0
-        self._queue: list[_QueuedCall] = []
+        self._queue: list[IncomingCall] = []
         self._http: httpx.AsyncClient | None = None
+        # Best-effort frames that had nowhere to go, flushed on the next auth_ok.
+        self._outbox: list[dict[str, Any]] = []
+        # Turn-terminal frames (result, error, suspend) awaiting the relay's ack. A result that is
+        # not acknowledged has not been recorded, whatever the socket reported.
+        self._pending: dict[str, _Pending] = {}
+        # Strong references to in-flight call tasks: the event loop only keeps weak ones, so an
+        # unreferenced task can be garbage-collected mid-run.
+        self._tasks: set[asyncio.Task[None]] = set()
 
     def handle(
         self, version: int | None = None, schema: VersionSchema | None = None
@@ -115,7 +144,15 @@ class Agent:
 
         supported_versions = [v for v in self._handlers if isinstance(v, int)]
         self._connections = [
-            Connection(url, self._config, self._dispatch, supported_versions) for url in relay_urls
+            Connection(
+                url,
+                self._config,
+                self._dispatch,
+                supported_versions,
+                on_ready=self._on_connection_ready,
+                on_ack=self._settle,
+            )
+            for url in relay_urls
         ]
         try:
             await asyncio.gather(*(conn.run() for conn in self._connections))
@@ -126,8 +163,81 @@ class Agent:
 
     async def stop(self) -> None:
         """Disconnect from all relays. Useful for testing or graceful shutdown."""
+        for entry in self._pending.values():
+            if entry.task is not None:
+                entry.task.cancel()
+        self._pending.clear()
+        self._outbox.clear()
         await asyncio.gather(*(conn.stop() for conn in self._connections))
         self._connections.clear()
+
+    # ─── Delivery ────────────────────────────────────────────────────────────
+
+    async def _deliver(self, payload: dict[str, Any]) -> bool:
+        """Sends on whichever connection is live, rather than the one a call arrived on. A
+        reconnect replaces the socket — and may land on another relay instance — but frames are
+        addressed by callId, so any authenticated connection can carry them."""
+        for conn in self._connections:
+            if await conn.send(payload):
+                return True
+        return False
+
+    async def _deliver_best_effort(self, payload: dict[str, Any]) -> None:
+        """Telemetry: held briefly if nothing is live, dropped once the cap is hit. Progress that
+        arrives late is worth little, and a backlog of stale steps after an outage is worth less."""
+        if await self._deliver(payload):
+            return
+        self._outbox.append(payload)
+        while len(self._outbox) > OUTBOX_MAX:
+            self._outbox.pop(0)
+
+    async def _deliver_terminal(self, call_id: str, turn: int, payload: dict[str, Any]) -> None:
+        """At-least-once: retried until the relay acks it. The relay's handlers are keyed by
+        callId and turn and guarded on the call still being live, so a duplicate is a no-op."""
+        key = _pending_key(call_id, turn)
+        entry = _Pending(call_id=call_id, payload=payload, since=asyncio.get_running_loop().time())
+        self._pending[key] = entry
+        entry.task = asyncio.create_task(self._retry_terminal(key))
+        await self._deliver(payload)
+
+    async def _retry_terminal(self, key: str) -> None:
+        loop = asyncio.get_running_loop()
+        while True:
+            await asyncio.sleep(RESULT_RETRY_S)
+            entry = self._pending.get(key)
+            if entry is None:
+                return
+            if loop.time() - entry.since > RESULT_RETRY_TIMEOUT_S:
+                self._config.logger.error(
+                    f"[z3t SDK] Gave up delivering the result for call {entry.call_id} after "
+                    f"{round(RESULT_RETRY_TIMEOUT_S / 60)} minutes without an acknowledgement"
+                )
+                self._pending.pop(key, None)
+                return
+            await self._deliver(entry.payload)
+
+    def _settle(self, call_id: str, turn: int | None = None) -> None:
+        """The relay acked a turn-terminal frame. An ack without a turn comes from a relay that
+        predates interactive calls — no call there has more than one turn, so every entry for the
+        call goes."""
+        if turn is not None:
+            keys = [_pending_key(call_id, turn)]
+        else:
+            keys = [k for k, e in self._pending.items() if e.call_id == call_id]
+        for key in keys:
+            entry = self._pending.pop(key, None)
+            if entry is not None and entry.task is not None:
+                entry.task.cancel()
+
+    async def _on_connection_ready(self) -> None:
+        """A connection just authenticated — drain anything that had nowhere to go, and re-send
+        every still-unacknowledged frame now rather than waiting out the retry interval."""
+        while self._outbox:
+            if not await self._deliver(self._outbox[0]):
+                return
+            self._outbox.pop(0)
+        for entry in list(self._pending.values()):
+            await self._deliver(entry.payload)
 
     # ─── Private ─────────────────────────────────────────────────────────────
 
@@ -160,6 +270,8 @@ class Agent:
                 entry["deprecates"] = schema.deprecates
             if schema.deprecation_notice:
                 entry["deprecationNotice"] = schema.deprecation_notice
+            if schema.interactive is not None:
+                entry["interactive"] = schema.interactive
             versions.append(entry)
 
         assert self._http is not None
@@ -185,12 +297,17 @@ class Agent:
                 "set status='active' in .handle() to publish."
             )
 
-    def _dispatch(self, call_id: str, schema_version: int, input: Any, send: Send) -> None:
-        self._enqueue(_QueuedCall(call_id, schema_version, input, send))
+    def _dispatch(self, call: IncomingCall) -> None:
+        self._enqueue(call)
 
-    def _enqueue(self, call: _QueuedCall) -> None:
+    def _spawn(self, coro: Awaitable[None]) -> None:
+        task = asyncio.ensure_future(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    def _enqueue(self, call: IncomingCall) -> None:
         if self._active_count < self._config.max_concurrent_calls:
-            asyncio.create_task(self._process_call(call))
+            self._spawn(self._process_call(call))
             return
 
         self._queue.append(call)
@@ -201,45 +318,119 @@ class Agent:
             self._config.logger.warn(
                 f"[z3t SDK] Queue depth exceeded (max {max_queue}) — rejecting call {oldest.call_id}"
             )
-            asyncio.create_task(
-                oldest.send({"type": "error", "callId": oldest.call_id, "message": "Queue depth exceeded"})
+            self._spawn(
+                self._deliver_terminal(
+                    oldest.call_id,
+                    oldest.turn,
+                    {"type": "error", "callId": oldest.call_id, "turn": oldest.turn, "message": "Queue depth exceeded"},
+                )
             )
 
     def _dequeue(self) -> None:
         if self._queue and self._active_count < self._config.max_concurrent_calls:
-            asyncio.create_task(self._process_call(self._queue.pop(0)))
+            self._spawn(self._process_call(self._queue.pop(0)))
 
-    async def _process_call(self, call: _QueuedCall) -> None:
+    async def _process_call(self, call: IncomingCall) -> None:
         self._active_count += 1
+        turn = call.turn
         try:
             handler = self._handlers.get(call.schema_version) or self._handlers.get("default")
             if handler is None:
-                await call.send(
+                await self._deliver_terminal(
+                    call.call_id,
+                    turn,
                     {
                         "type": "error",
                         "callId": call.call_id,
+                        "turn": turn,
                         "message": f"No handler for schema version {call.schema_version}",
-                    }
+                    },
                 )
                 return
 
             assert self._http is not None
+            journal = CallJournal(call.resume)
             ctx = create_call_context(
                 call.call_id,
                 call.schema_version,
-                call.send,
+                self._deliver_best_effort,
                 self._config,
                 create_llm_clients(self._config, call.call_id),
                 self._http,
+                journal=journal,
+                can_ask=call.can_ask,
+                turn=turn,
             )
 
+            # Per turn: a resumed call gets a fresh timeout, not what was left of the first one.
+            output: Any = None
+            error: str | None = None
+            suspended = False
             try:
                 output = await asyncio.wait_for(handler(call.input, ctx), timeout=self._config.timeout)
-                await call.send({"type": "result", "callId": call.call_id, "output": output})
+            except SuspendSignal:
+                suspended = True
             except asyncio.TimeoutError:
-                await call.send({"type": "error", "callId": call.call_id, "message": "Handler timeout"})
+                error = "Handler timeout"
             except Exception as exc:  # noqa: BLE001 — any handler exception becomes an error frame
-                await call.send({"type": "error", "callId": call.call_id, "message": str(exc)})
+                error = str(exc)
+            except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+                raise
+            except BaseException as exc:  # noqa: BLE001
+                # SuspendSignal raised inside an asyncio.TaskGroup arrives wrapped in a
+                # BaseExceptionGroup, which neither clause above matches. The journal says whether
+                # it was a question; anything else still owes the relay a terminal frame.
+                if journal.pending is not None:
+                    suspended = True
+                else:
+                    error = str(exc)
+
+            await self._finish_turn(call.call_id, turn, journal, output=output, error=error, suspended=suspended)
         finally:
             self._active_count -= 1
             self._dequeue()
+
+    async def _finish_turn(
+        self,
+        call_id: str,
+        turn: int,
+        journal: CallJournal,
+        *,
+        output: Any,
+        error: str | None,
+        suspended: bool,
+    ) -> None:
+        """Ends a turn with exactly one turn-terminal frame. A question recorded in the journal
+        wins over whatever the handler did afterwards: ``ctx.ask`` unwinds the handler by raising,
+        and a handler that catches that and returns must not turn a pause into a result."""
+        if journal.pending is not None:
+            if not suspended:
+                self._config.logger.warn(
+                    f'[z3t SDK] Call {call_id}: the handler caught the suspend signal from ctx.ask("{journal.pending.key}") '
+                    "and carried on. The run is suspended regardless — let the exception propagate."
+                )
+            try:
+                checkpoint = journal.checkpoint()
+            except ValueError as exc:
+                await self._deliver_terminal(call_id, turn, {"type": "error", "callId": call_id, "turn": turn, "message": str(exc)})
+                return
+            await self._deliver_terminal(
+                call_id,
+                turn,
+                {"type": "suspend", "callId": call_id, "turn": turn, "request": journal.pending.to_wire(), "checkpoint": checkpoint},
+            )
+            return
+
+        if error is None:
+            # Checked here rather than left to the socket: a value json can't encode would raise
+            # inside every delivery attempt, and NaN/Infinity encode to text the relay can't parse —
+            # either way the result would never be acked and the call would time out.
+            try:
+                json.dumps(output, allow_nan=False)
+            except (TypeError, ValueError) as exc:
+                error = f"Handler returned a value that can't be sent as JSON: {exc}"
+
+        if error is not None:
+            await self._deliver_terminal(call_id, turn, {"type": "error", "callId": call_id, "turn": turn, "message": error})
+            return
+        await self._deliver_terminal(call_id, turn, {"type": "result", "callId": call_id, "turn": turn, "output": output})

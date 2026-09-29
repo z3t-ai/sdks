@@ -242,6 +242,7 @@ VersionSchema(
     # status="active",           # publishes and freezes the schema
     deprecates=[1],              # optional — earlier versions this one replaces
     deprecation_notice="v1 is replaced by v2. Add `language` and send `documents` as a list.",
+    interactive=True,            # optional — this version may pause runs to ask (frozen once active)
 )
 ```
 
@@ -257,6 +258,62 @@ versions aren't publicly visible yet.
 
 ---
 
+## Asking the consumer a question
+
+Consumers rarely fill in a form perfectly. An **interactive** version can read what it received,
+notice what is missing or contradictory, and ask — before it does the expensive work:
+
+```python
+@agent.handle(version=3, schema=VersionSchema(
+    input=s.object({"invoices": s.array(s.file_uri())}),
+    output=s.object({"notice": s.file_output()}),
+    interactive=True,
+))
+async def handle(input, ctx):
+    facts = await ctx.step("extract", lambda: extract_facts(input, ctx))   # paid for once
+
+    if facts["missing_contract"]:
+        r = await ctx.ask(
+            "contract",
+            message=f"Invoice 3 refers to contract **{facts['contract_no']}**, which wasn't uploaded. Can you upload it?",
+            schema=s.object({"contract": s.file_uri(title="Contract").optional()}),
+        )
+        if r.answered and r.answers.get("contract"):
+            facts["contract"] = r.answers["contract"]
+        # "declined" | "expired" | "unavailable" → carry on with a stated assumption
+
+    return await ctx.step("draft", lambda: draft_notice(facts, ctx))
+```
+
+`ctx.ask` does not wait for the answer — that could take days. It ends the turn: your handler
+stops, the platform shows the consumer the question (and emails them), and when they answer, skip,
+or the deadline passes, the call is dispatched again — possibly to another replica of your agent.
+Your handler **runs from the top**: `ctx.step` returns what it returned last time instead of running
+again, and `ctx.ask` returns an `AskResult`:
+
+| `result.action` | When |
+|---|---|
+| `"answered"` | The consumer filled in the form — `result.answers` matches your schema |
+| `"declined"` | The consumer skipped the question |
+| `"expired"` | Nobody answered within the deadline (7 days) — the run is not refunded, so finish with your best effort |
+| `"unavailable"` | This run can't take questions (an API integration that didn't opt in, another agent, or the call used its 3 questions). Nothing was paused. |
+
+**Rules of thumb**
+
+- Put expensive or side-effecting work in `ctx.step` (the function may be sync or async). Code
+  outside steps runs again on every resume — uploads belong inside a step.
+- Step results must be JSON-serializable and come back in their JSON form (a tuple becomes a list)
+  — on the first run too. The whole journal is capped at 2 MB.
+- Keys are unique per call, across steps and questions.
+- The pause unwinds your handler by raising `SuspendSignal`, a `BaseException` — `except Exception:`
+  won't catch it. Don't catch it deliberately; the SDK suspends anyway and logs a warning.
+- The handler `timeout` applies per turn.
+
+Nothing about the call is cached on your machine: the platform hands the journal back with the
+resume, and deletes it when the call ends.
+
+---
+
 ## `CallContext` reference
 
 Passed as the second argument to every handler.
@@ -264,7 +321,11 @@ Passed as the second argument to every handler.
 | Member | Signature | Notes |
 |---|---|---|
 | `ctx.call_id` / `ctx.schema_version` | `str` / `int` | — |
-| `ctx.progress(step, message, progress=None)` | `async` | Fire-and-forget; `progress` is 0–1 |
+| `ctx.progress(step, message, progress=None)` | `async` | Fire-and-forget milestone — one activity-log row per call; `progress` is 0–1 |
+| `ctx.subprogress(message, progress=None)` | `async` | Detail within the current step — replaces the previous sub-line instead of adding a row |
+| `ctx.step(key, fn)` | `async -> Any` | Runs `fn` once per call; on a resumed turn returns the recorded result (see above) |
+| `ctx.ask(key, *, message, schema)` | `async -> AskResult` | Pauses the run to ask the consumer (interactive versions only) |
+| `ctx.turn` / `ctx.can_ask` | `int` / `bool` | 0 on the first dispatch, +1 per resume / whether `ask` can pause this run |
 | `ctx.files.download(uri)` | `async -> DownloadResult` | `DownloadResult(buffer: bytes, filename: str, mime_type: str)` |
 | `ctx.files.upload(data, filename, mime_type)` | `async -> str` | Returns the new `z3t://files/{id}` URI |
 | `ctx.taxonomies.entries(uri)` | `async -> list[TaxonomyEntry]` | — |
